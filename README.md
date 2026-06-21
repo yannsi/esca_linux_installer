@@ -97,4 +97,4 @@ swapoff -a 2>/dev/null || true
 
 ## ライセンス
 
-MIT
+MIT License - 詳細は [`LICENSE`](./LICENSE) を参照してください（[日本語参考訳](./LICENSE.ja.md)も用意していますが、法的効力は英語の原文が優先されます）。
