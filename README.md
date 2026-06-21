@@ -58,7 +58,7 @@ sudo bash install.sh
 
 ```bash
 git clone https://github.com/yannsi/archinstall.git
-cd myarchinstall
+cd archinstall
 sudo bash build-iso.sh
 ```
 
