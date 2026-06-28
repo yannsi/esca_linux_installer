@@ -1564,6 +1564,30 @@ EOF"
   run_cmd "キーマップ設定" \
     bash -c "echo 'KEYMAP=${CONFIG[keymap]}' > /mnt/etc/vconsole.conf"
 
+  # X11 キーボードレイアウト設定
+  local xkb_layout="us"
+  local xkb_model=""
+  case "${CONFIG[keymap]}" in
+    jp106) xkb_layout="jp"; xkb_model="jp106" ;;
+    uk)    xkb_layout="gb" ;;
+    us)    xkb_layout="us" ;;
+    *)     xkb_layout="${CONFIG[keymap]}" ;;
+  esac
+
+  if [[ -n "$xkb_layout" && "$xkb_layout" != "none" ]]; then
+    run_cmd "X11 キーマップ設定" bash -c "
+      mkdir -p /mnt/etc/X11/xorg.conf.d
+      {
+        echo 'Section \"InputClass\"'
+        echo '        Identifier \"system-keyboard\"'
+        echo '        MatchIsKeyboard \"on\"'
+        echo \"        Option \\\"XkbLayout\\\" \\\"${xkb_layout}\\\"\"
+        [[ -n \"${xkb_model}\" ]] && echo \"        Option \\\"XkbModel\\\" \\\"${xkb_model}\\\"\"
+        echo 'EndSection'
+      } > /mnt/etc/X11/xorg.conf.d/00-keyboard.conf
+    "
+  fi
+
   # ホスト名
   run_cmd "hostname 設定" \
     bash -c "echo '${CONFIG[hostname]}' > /mnt/etc/hostname"
@@ -1822,6 +1846,20 @@ end
 EOF
     fi
   "
+
+  # Chromium / Electron 系アプリの Wayland / IME 連携設定
+  if [[ "${CONFIG[desktop]}" != "none" ]]; then
+    run_cmd "Chromium/Electron 向け Wayland IME 連携設定" bash -c "
+      mkdir -p /mnt/etc/skel/.config
+      cat > /mnt/etc/skel/.config/chrome-flags.conf << 'EOF'
+--ozone-platform-hint=auto
+--enable-wayland-ime
+EOF
+      cp /mnt/etc/skel/.config/chrome-flags.conf /mnt/etc/skel/.config/chromium-flags.conf
+      cp /mnt/etc/skel/.config/chrome-flags.conf /mnt/etc/skel/.config/electron-flags.conf
+      cp /mnt/etc/skel/.config/chrome-flags.conf /mnt/etc/skel/.config/code-flags.conf
+    "
+  fi
 
   # initramfs の再生成
   run_cmd "initramfs 再生成 (mkinitcpio)" arch-chroot /mnt mkinitcpio -P
@@ -2227,7 +2265,7 @@ do_desktop() {
     pipewire pipewire-pulse wireplumber
     pipewire-alsa pipewire-jack libldac
     bluez bluez-utils
-    xdg-user-dirs
+    xdg-user-dirs xdg-utils
     firefox
     ntfs-3g exfatprogs
     gvfs gvfs-mtp
@@ -2319,6 +2357,18 @@ EOF
       echo 'exec nm-applet --indicator' >> /mnt/etc/skel/.config/sway/config
       if [[ "${CONFIG[jp_ime]:-none}" =~ ^fcitx5 ]]; then
         echo 'exec fcitx5 -d' >> /mnt/etc/skel/.config/sway/config
+      elif [[ "${CONFIG[jp_ime]:-none}" =~ ^ibus ]]; then
+        echo 'exec ibus-daemon -drx' >> /mnt/etc/skel/.config/sway/config
+      fi
+
+      # キーボードレイアウト設定
+      if [[ "${CONFIG[keymap]}" == "jp106" ]]; then
+        echo 'input * xkb_layout "jp"' >> /mnt/etc/skel/.config/sway/config
+        echo 'input * xkb_model "jp106"' >> /mnt/etc/skel/.config/sway/config
+      elif [[ -n "${CONFIG[keymap]}" && "${CONFIG[keymap]}" != "none" ]]; then
+        local wl_layout="${CONFIG[keymap]}"
+        [[ "$wl_layout" == "uk" ]] && wl_layout="gb"
+        echo "input * xkb_layout \"${wl_layout}\"" >> /mnt/etc/skel/.config/sway/config
       fi
 
       # polkit-gnome 認証エージェントの自動起動設定
@@ -2389,6 +2439,18 @@ EOF
       echo 'exec-once = nm-applet --indicator' >> /mnt/etc/skel/.config/hypr/hyprland.conf
       if [[ "${CONFIG[jp_ime]:-none}" =~ ^fcitx5 ]]; then
         echo 'exec-once = fcitx5 -d' >> /mnt/etc/skel/.config/hypr/hyprland.conf
+      elif [[ "${CONFIG[jp_ime]:-none}" =~ ^ibus ]]; then
+        echo 'exec-once = ibus-daemon -drx' >> /mnt/etc/skel/.config/hypr/hyprland.conf
+      fi
+
+      # キーボードレイアウト設定
+      if [[ "${CONFIG[keymap]}" == "jp106" ]]; then
+        echo 'input { kb_layout = jp }' >> /mnt/etc/skel/.config/hypr/hyprland.conf
+        echo 'input { kb_model = jp106 }' >> /mnt/etc/skel/.config/hypr/hyprland.conf
+      elif [[ -n "${CONFIG[keymap]}" && "${CONFIG[keymap]}" != "none" ]]; then
+        local wl_layout="${CONFIG[keymap]}"
+        [[ "$wl_layout" == "uk" ]] && wl_layout="gb"
+        echo "input { kb_layout = ${wl_layout} }" >> /mnt/etc/skel/.config/hypr/hyprland.conf
       fi
 
       # polkit-gnome 認証エージェントの自動起動設定
@@ -2447,6 +2509,34 @@ EOF
       echo 'spawn-at-startup "nm-applet" "--indicator"' >> /mnt/etc/skel/.config/niri/config.kdl
       if [[ "${CONFIG[jp_ime]:-none}" =~ ^fcitx5 ]]; then
         echo 'spawn-at-startup "fcitx5" "-d"' >> /mnt/etc/skel/.config/niri/config.kdl
+      elif [[ "${CONFIG[jp_ime]:-none}" =~ ^ibus ]]; then
+        echo 'spawn-at-startup "ibus-daemon" "-drx"' >> /mnt/etc/skel/.config/niri/config.kdl
+      fi
+
+      # キーボードレイアウト設定
+      if [[ "${CONFIG[keymap]}" == "jp106" ]]; then
+        cat >> /mnt/etc/skel/.config/niri/config.kdl << 'EOF'
+input {
+    keyboard {
+        xkb {
+            layout "jp"
+            model "jp106"
+        }
+    }
+}
+EOF
+      elif [[ -n "${CONFIG[keymap]}" && "${CONFIG[keymap]}" != "none" ]]; then
+        local wl_layout="${CONFIG[keymap]}"
+        [[ "$wl_layout" == "uk" ]] && wl_layout="gb"
+        cat >> /mnt/etc/skel/.config/niri/config.kdl << EOF
+input {
+    keyboard {
+        xkb {
+            layout "${wl_layout}"
+        }
+    }
+}
+EOF
       fi
 
       # Waybar の表示トグル設定追加
@@ -2455,6 +2545,36 @@ EOF
       # polkit-gnome 認証エージェントの自動起動設定
       echo 'spawn-at-startup "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1"' >> /mnt/etc/skel/.config/niri/config.kdl
       print_ok "スクロール型タイリング: 横スクロールで無限ワークスペース"
+      ;;
+  esac
+
+  # Sway, Hyprland, Niri 用の MIME デフォルト関連付け設定 (mimeapps.list)
+  case "${CONFIG[desktop]}" in
+    sway|hyprland|niri)
+      run_cmd "MIME デフォルト関連付け設定 (Sway/Hyprland/Niri)" bash -c "
+        mkdir -p /mnt/etc/skel/.config
+        cat > /mnt/etc/skel/.config/mimeapps.list << 'EOF'
+[Default Applications]
+text/html=firefox.desktop
+x-scheme-handler/http=firefox.desktop
+x-scheme-handler/https=firefox.desktop
+x-scheme-handler/about=firefox.desktop
+x-scheme-handler/unknown=firefox.desktop
+inode/directory=thunar.desktop
+text/plain=org.xfce.mousepad.desktop
+application/pdf=org.pwmt.zathura.desktop
+image/png=imv.desktop
+image/jpeg=imv.desktop
+image/gif=imv.desktop
+image/webp=imv.desktop
+video/mp4=mpv.desktop
+video/x-matroska=mpv.desktop
+video/webm=mpv.desktop
+audio/mpeg=mpv.desktop
+audio/flac=mpv.desktop
+audio/ogg=mpv.desktop
+EOF
+      "
       ;;
   esac
 }
