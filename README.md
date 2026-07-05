@@ -19,7 +19,7 @@ Arch Linux のインストールメディア (Live USB) から起動し、イン
 
 1. スクリプトを実行します。
    ```bash
-   bash install.sh
+   sudo bash install.sh
    ```
 2. 画面の指示に従い、以下の項目を選択・入力します。
    - インストール先ディスク
@@ -35,7 +35,7 @@ Arch Linux のインストールメディア (Live USB) から起動し、イン
 実際にディスクに変更を加えず、どのような処理が行われるかテストしたい場合は `--dry-run` オプションを使用します。
 
 ```bash
-bash install.sh --dry-run
+sudo bash install.sh --dry-run
 ```
 
 ## 注意事項
