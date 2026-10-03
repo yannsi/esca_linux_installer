@@ -19,6 +19,52 @@ DIM='\033[2m'
 GRAY='\033[0;90m'
 MAGENTA='\033[0;35m'
 RESET='\033[0m'
+# カーソル位置から行末までを消去する。\r で同じ行を書き直すときに使う。
+# 【重要】空白を詰めて前の文字を消す方式に戻さないこと。説明が長いと
+# 80桁を超えて折り返し、\r が折り返し後の行頭にしか戻れず表示が崩れる。
+CLR='\033[K'
+
+# --- 状態記号 ---
+# 【重要】Linux の標準コンソール（TERM=linux、公式 Live ISO の tty）の
+# フォントには ✔ ⚠ ✘ … ▶ ━ が無い。もともと日本語も豆腐になる環境なので、
+# 記号まで化けると成功・失敗の区別すらつかなくなる。そこでは ASCII に切り替える。
+# kmscon（build-iso.sh の ISO）や GUI の端末は TERM が linux 以外なので記号のまま。
+# ESCA_ASCII=1 で強制的に ASCII にもできる。
+if [[ "${TERM:-}" == "linux" || "${ESCA_ASCII:-0}" == "1" ]]; then
+  ICON_OK="[OK]"; ICON_WARN="[!!]"; ICON_ERR="[NG]"; ICON_RUN="..."
+  ICON_STEP=">>";  ICON_BULLET="*";  RULE_H="=";       DASH="-"
+else
+  ICON_OK="✔";    ICON_WARN="⚠";    ICON_ERR="✘";    ICON_RUN="…"
+  ICON_STEP="▶";  ICON_BULLET="•";  RULE_H="━";       DASH="—"
+fi
+
+# 区切り線を出す。引数1: 文字 / 引数2: 個数
+_rule() {
+  local s
+  printf -v s '%*s' "$2" ''
+  printf '%s' "${s// /$1}"
+}
+
+# 文字列の表示幅（全角=2・半角=1）を返す。ロケールに依存しないよう、
+# C ロケールでバイト数と文字数を数えて求める（UTF-8 の日本語は 3 バイトで幅 2）。
+# 【重要】${#s} をそのまま使わないこと。Live ISO の C ロケールではバイト数になり、
+# UTF-8 ロケールでは文字数になる。どちらも表示幅とは一致しない。
+_dispw() {
+  local LC_ALL=C
+  local s="$1" t
+  t="${s//[$'\x80'-$'\xbf']/}"
+  echo $(( ${#t} + (${#s} - ${#t}) / 2 ))
+}
+
+# 「見出し  値」の1行を、見出しの表示幅を揃えて出す。引数1: 見出し / 引数2: 値
+SUMMARY_LABEL_W=16
+_kv() {
+  local w pad
+  w=$(_dispw "$1")
+  pad=$(( SUMMARY_LABEL_W - w ))
+  (( pad < 1 )) && pad=1
+  printf '  %b%s%b%*s%s\n' "$BOLD" "$1" "$RESET" "$pad" '' "$2"
+}
 
 # --- 引数解析 & ログ初期化 ---
 DRY_RUN="no"
@@ -626,7 +672,7 @@ _on_interrupt() {
   trap '' INT
   echo ""
   if [[ -n "${_RUN_PID:-}" ]] && kill -0 "$_RUN_PID" 2>/dev/null; then
-    echo -e "  ${YELLOW}⚠${RESET} 実行中の処理を停止しています..."
+    echo -e "  ${YELLOW}${ICON_WARN}${RESET} 実行中の処理を停止しています..."
     _kill_tree "$_RUN_PID"
     local i
     for i in {1..50}; do
@@ -636,7 +682,7 @@ _on_interrupt() {
     kill -0 "$_RUN_PID" 2>/dev/null && kill -KILL "$_RUN_PID" 2>/dev/null
   fi
   _cleanup_temp_sudoers
-  echo -e "  ${YELLOW}⚠${RESET} 中断しました。/mnt がマウントされたままの場合は umount -R /mnt を実行してください。"
+  echo -e "  ${YELLOW}${ICON_WARN}${RESET} 中断しました。/mnt がマウントされたままの場合は umount -R /mnt を実行してください。"
   exit 130
 }
 
@@ -655,7 +701,7 @@ _on_error() {
   local caller_line="${BASH_LINENO[1]:-?}"
   local fn="${FUNCNAME[1]:-main}"
   echo ""
-  echo -e "${RED}${BOLD}✘ 予期しないエラーで停止しました${RESET}"
+  echo -e "${RED}${BOLD}${ICON_ERR} 予期しないエラーで停止しました${RESET}"
   echo -e "${RED}  終了コード  : ${rc}${RESET}"
   echo -e "${RED}  失敗した処理: ${BASH_COMMAND}${RESET}"
   echo -e "${RED}  発生場所    : ${fn}() の ${line} 行目${RESET}"
@@ -719,7 +765,7 @@ print_header() {
   clear
   echo ""
   echo -e "  ${YELLOW}${BOLD}(o)${RESET} ${CYAN}${BOLD}${OS_NAME}${RESET}  ${GRAY}│${RESET}  ${DIM}${OS_TAGLINE}${RESET}"
-  echo -e "  ${CYAN}$(printf '━%.0s' {1..48})${RESET}"
+  echo -e "  ${CYAN}$(_rule "$RULE_H" 48)${RESET}"
   echo ""
 }
 
@@ -733,20 +779,35 @@ print_step() {
     CURRENT_STEP_NAME="$1"
     CURRENT_STEP_TS=$SECONDS
     STEP_NUM=$(( ${STEP_NUM:-0} + 1 ))
-    echo -e "  ${MAGENTA}${BOLD}[${STEP_NUM}/${STEP_TOTAL}]${RESET} ${BLUE}${BOLD}▶ $1${RESET}"
+    echo -e "  ${MAGENTA}${BOLD}[${STEP_NUM}/${STEP_TOTAL}]${RESET} ${BLUE}${BOLD}${ICON_STEP} $1${RESET}"
     if [[ -n "${INSTALL_START:-}" ]]; then
       echo -e "  ${GRAY}経過時間: $(( (SECONDS - INSTALL_START) / 60 ))分$(( (SECONDS - INSTALL_START) % 60 ))秒${RESET}"
     fi
   else
-    echo -e "  ${BLUE}${BOLD}▶ $1${RESET}"
+    echo -e "  ${BLUE}${BOLD}${ICON_STEP} $1${RESET}"
   fi
   echo -e "  ${BLUE}${DIM}$(printf '─%.0s' {1..48})${RESET}"
   echo ""
 }
 
-print_ok()   { echo -e "  ${GREEN}✔${RESET} $1"; }
-print_warn() { echo -e "  ${YELLOW}⚠${RESET} $1"; }
-print_err()  { echo -e "  ${RED}✘${RESET} $1"; }
+print_ok()   { echo -e "  ${GREEN}${ICON_OK}${RESET} $1"; }
+print_warn() {
+  echo -e "  ${YELLOW}${ICON_WARN}${RESET} $1"
+  _add_notice "$1"
+}
+
+# インストール実行中（INSTALL_START 以降）の警告を控えておき、完了画面で再表示する。
+# 【重要】各ステップは開始時に画面を消去するため、「KDE は仮想キーボードで
+# Fcitx5 を選ぶ」「AUR を後から入れる手順」のような後で必要な案内が
+# すぐ流れて読めなくなる。控えたものを最後にまとめて出す。
+# ドライランの「スキップしました」系は全ステップで出るだけなので控えない。
+NOTICES=()
+_add_notice() {
+  [[ -n "${INSTALL_START:-}" ]] || return 0
+  [[ "$1" == *ドライラン* ]] && return 0
+  NOTICES+=("$1")
+}
+print_err()  { echo -e "  ${RED}${ICON_ERR}${RESET} $1"; }
 
 # 出力/入力に使う tty を解決する（/dev/tty が使えなければ stderr/stdin へフォールバック）。
 # 使い方: local tty_out tty_in; _resolve_tty tty_out tty_in
@@ -771,7 +832,7 @@ _read_input() {
   fi
   if [[ "$rc" -ne 0 ]]; then
     echo "" > "$dst"
-    echo -e "  ${RED}✘ 入力を読み取れませんでした（入力が尽きたか、端末が切断されました）。${RESET}" > "$dst"
+    echo -e "  ${RED}${ICON_ERR} 入力を読み取れませんでした（入力が尽きたか、端末が切断されました）。${RESET}" > "$dst"
     echo -e "  ${GRAY}このスクリプトは対話式です。パイプ経由ではなく直接実行してください。${RESET}" > "$dst"
     echo -e "  ${GRAY}例: sudo bash install.sh${RESET}" > "$dst"
     exit 1
@@ -797,7 +858,7 @@ _exec_timed() {
   while kill -0 "$pid" 2>/dev/null; do
     elapsed=$(( SECONDS - start_ts ))
     if [[ "$elapsed" -ge 5 ]]; then
-      echo -ne "\r  ${CYAN}…${RESET} ${desc}... （$(( elapsed / 60 ))分$(( elapsed % 60 ))秒経過）  "
+      echo -ne "\r  ${CYAN}${ICON_RUN}${RESET} ${desc}... （$(( elapsed / 60 ))分$(( elapsed % 60 ))秒経過）${CLR}"
       sleep 1
     else
       sleep 0.1
@@ -814,15 +875,15 @@ _exec_timed() {
 run_cmd() {
   # コマンドを実行しログに残す。失敗時はエラー表示して終了
   local desc="$1"; shift
-  echo -ne "  ${CYAN}…${RESET} ${desc}..."
+  echo -ne "  ${CYAN}${ICON_RUN}${RESET} ${desc}..."
   if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
-    echo -e "\r  ${YELLOW}⚠${RESET} ${desc} (ドライラン - スキップ)"
+    echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} ${desc} (ドライラン - スキップ)${CLR}"
     return 0
   fi
   if _exec_timed "$desc" "$@"; then
-    echo -e "\r  ${GREEN}✔${RESET} ${desc}                              "
+    echo -e "\r  ${GREEN}${ICON_OK}${RESET} ${desc}${CLR}"
   else
-    echo -e "\r  ${RED}✘${RESET} ${desc} — 失敗                              "
+    echo -e "\r  ${RED}${ICON_ERR}${RESET} ${desc} ${DASH} 失敗${CLR}"
     print_err "ログ: ${CONFIG[log_file]}"
     # カーネルの直近エラーもログに追記
     echo "--- dmesg (直近10行) ---" >> "${CONFIG[log_file]}"
@@ -838,26 +899,26 @@ run_cmd_retry() {
   local attempt=1
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if [[ "$attempt" -gt 1 ]]; then
-      echo -ne "  ${CYAN}…${RESET} ${desc}（リトライ ${attempt}/${max_attempts}）..."
+      echo -ne "  ${CYAN}${ICON_RUN}${RESET} ${desc}（リトライ ${attempt}/${max_attempts}）..."
     else
-      echo -ne "  ${CYAN}…${RESET} ${desc}..."
+      echo -ne "  ${CYAN}${ICON_RUN}${RESET} ${desc}..."
     fi
     if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
-      echo -e "\r  ${YELLOW}⚠${RESET} ${desc} (ドライラン - スキップ)"
+      echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} ${desc} (ドライラン - スキップ)${CLR}"
       return 0
     fi
     if _exec_timed "$desc" "$@"; then
-      echo -e "\r  ${GREEN}✔${RESET} ${desc}                              "
+      echo -e "\r  ${GREEN}${ICON_OK}${RESET} ${desc}${CLR}"
       return 0
     fi
-    echo -e "\r  ${YELLOW}⚠${RESET} ${desc} — 失敗 (試行 ${attempt}/${max_attempts})                              "
+    echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} ${desc} ${DASH} 失敗 (試行 ${attempt}/${max_attempts})${CLR}"
     attempt=$(( attempt + 1 ))
     if [[ "$attempt" -le "$max_attempts" ]]; then
-      echo -e "  ${YELLOW}…${RESET} 10秒後にリトライします..."
+      echo -e "  ${YELLOW}${ICON_RUN}${RESET} 10秒後にリトライします..."
       sleep 10
     fi
   done
-  echo -e "  ${RED}✘${RESET} ${desc} — ${max_attempts}回試行しましたが失敗しました"
+  echo -e "  ${RED}${ICON_ERR}${RESET} ${desc} — ${max_attempts}回試行しましたが失敗しました"
   print_err "ログ: ${CONFIG[log_file]}"
   exit 1
 }
@@ -865,17 +926,21 @@ run_cmd_retry() {
 run_cmd_soft() {
   # 失敗してもインストールを継続する（Google Chrome 等の任意処理用）。
   local desc="$1"; shift
-  echo -ne "  ${CYAN}…${RESET} ${desc}..."
+  echo -ne "  ${CYAN}${ICON_RUN}${RESET} ${desc}..."
   if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
-    echo -e "\r  ${YELLOW}⚠${RESET} ${desc} (ドライラン - スキップ)"
+    echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} ${desc} (ドライラン - スキップ)${CLR}"
     return 0
   fi
   if _exec_timed "$desc" "$@"; then
-    echo -e "\r  ${GREEN}✔${RESET} ${desc}                              "
+    echo -e "\r  ${GREEN}${ICON_OK}${RESET} ${desc}${CLR}"
     return 0
   fi
-  echo -e "\r  ${YELLOW}⚠${RESET} ${desc} — 失敗（スキップして継続）                              "
-  print_warn "このパッケージは後から手動で導入できます。ログ: ${CONFIG[log_file]}"
+  echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} ${desc} ${DASH} 失敗（スキップして継続）${CLR}"
+  # 【重要】ここで「このパッケージは後から導入できます」と言わないこと。
+  # run_cmd_soft は設定ファイルの書き換えなどパッケージ以外にも使っており、
+  # 内容と食い違う案内になる。何が失敗したかとログの場所だけを伝える。
+  echo -e "    ${GRAY}詳細はログを確認してください: ${CONFIG[log_file]}${RESET}"
+  _add_notice "${desc} に失敗しました（スキップして継続）"
   return 1
 }
 
@@ -901,7 +966,7 @@ ask_password() {
     echo -ne "  ${BOLD}${prompt}${RESET}: " > "$tty_out"
     _read_input pw1 "$tty_in" "$tty_out" silent; echo > "$tty_out"
     if [[ "$pw1" == *"|"* ]]; then
-      echo -e "  ${RED}✘${RESET} パスワードに '|' は使用できません。" > "$tty_out"
+      echo -e "  ${RED}${ICON_ERR}${RESET} パスワードに '|' は使用できません。" > "$tty_out"
       continue
     fi
     echo -ne "  ${BOLD}（確認）${prompt}${RESET}: " > "$tty_out"
@@ -910,7 +975,7 @@ ask_password() {
       echo "$pw1"
       return
     fi
-    echo -e "  ${RED}✘${RESET} パスワードが一致しません。もう一度入力してください。" > "$tty_out"
+    echo -e "  ${RED}${ICON_ERR}${RESET} パスワードが一致しません。もう一度入力してください。" > "$tty_out"
   done
 }
 
@@ -924,7 +989,7 @@ confirm() {
     case "$answer" in
       [yY]) return 0 ;;
       [nN]|"") return 1 ;;
-      *) echo -e "  ${RED}✘${RESET} y または n を入力してください。" > "$tty_out" ;;
+      *) echo -e "  ${RED}${ICON_ERR}${RESET} y または n を入力してください。" > "$tty_out" ;;
     esac
   done
 }
@@ -940,7 +1005,7 @@ confirm_yes() {
     case "$answer" in
       [yY]|"") return 0 ;;
       [nN]) return 1 ;;
-      *) echo -e "  ${RED}✘${RESET} y または n を入力してください。" > "$tty_out" ;;
+      *) echo -e "  ${RED}${ICON_ERR}${RESET} y または n を入力してください。" > "$tty_out" ;;
     esac
   done
 }
@@ -965,7 +1030,7 @@ select_from_list() {
       echo "${options[$((choice-1))]}"
       return
     fi
-    echo -e "  ${RED}✘${RESET} 1〜${max} の番号を入力してください。" > "$tty_out"
+    echo -e "  ${RED}${ICON_ERR}${RESET} 1〜${max} の番号を入力してください。" > "$tty_out"
   done
 }
 
@@ -1224,7 +1289,7 @@ step_partition_scheme() {
     "自動 - EFI 512M + swap (RAM同容量) + /（ハイバネート使用時）") CONFIG[partition_scheme]="auto_swap" ;;
     "手動（fdisk を起動）")                                        CONFIG[partition_scheme]="manual" ;;
   esac
-  print_ok "パーティション構成: ${CONFIG[partition_scheme]}"
+  print_ok "パーティション構成: $(_label partition_scheme)"
 
   # ファイルシステム選択（手動時はユーザーが自分でフォーマットするため省略）
   if [[ "${CONFIG[partition_scheme]}" != "manual" ]]; then
@@ -1372,7 +1437,7 @@ step_system() {
     # 検出に成功した場合は確認せず自動採用する
     # （検出失敗時のみ下の手動選択にフォールバック）
     CONFIG[gpu_driver]="$recommended"
-    print_ok "検出された GPU: ${detected_gpu} → ドライバー ${CONFIG[gpu_driver]} を自動選択"
+    print_ok "検出された GPU: ${detected_gpu} → $(_label gpu_driver) のドライバーを自動選択"
     return
   fi
 
@@ -1401,7 +1466,7 @@ step_system() {
     "仮想環境  - VirtualBox・VMware 上で動かしている場合")              CONFIG[gpu_driver]="virtual" ;;
     *)                                                                   CONFIG[gpu_driver]="none" ;;
   esac
-  print_ok "GPU ドライバー: ${CONFIG[gpu_driver]}"
+  print_ok "GPU ドライバー: $(_label gpu_driver)"
 }
 
 # ============================================
@@ -1528,7 +1593,7 @@ ${entry}"
     while IFS= read -r entry; do
       [[ -z "$entry" ]] && continue
       parse_users_line "$entry"
-      echo -e "    ${CYAN}•${RESET} ${uname}  sudo: ${usudo}  shell: ${ushell}"
+      echo -e "    ${CYAN}${ICON_BULLET}${RESET} ${uname}  sudo: ${usudo}  shell: ${ushell}"
     done <<< "${CONFIG[users]}"
   fi
 }
@@ -1614,12 +1679,12 @@ step_desktop() {
       "標準  - plasma-meta + 基本アプリ（約1.5GB・推奨）") CONFIG[kde_apps]="standard" ;;
       "フル  - kde-applications 全部入り（約4GB）") CONFIG[kde_apps]="full" ;;
     esac
-    print_ok "KDE アプリ規模: ${CONFIG[kde_apps]}"
+    print_ok "KDE アプリ規模: $(_label kde_apps)"
   else
     CONFIG[kde_apps]="none"
   fi
 
-  print_ok "デスクトップ: ${CONFIG[desktop]}"
+  print_ok "デスクトップ: $(_label desktop)"
 
   # DE が none の場合は DM 不要
   [[ "${CONFIG[desktop]}" == "none" ]] && { CONFIG[dm]="none"; return; }
@@ -1720,7 +1785,7 @@ step_desktop() {
       ;;
   esac
 
-  print_ok "DM: ${CONFIG[dm]}"
+  print_ok "ログイン画面 (DM): $(_label dm)"
 }
 
 # ============================================
@@ -1826,11 +1891,11 @@ step_config_source() {
   # インストール本番（do_desktop）まで失敗が分からないと、
   # 「設定が入らなかった理由」が分かりにくくなるため。
   if [[ "${CONFIG[config_source]}" == "git" ]]; then
-    echo -ne "  ${CYAN}…${RESET} GitHub から dotfiles を取得中..."
+    echo -ne "  ${CYAN}${ICON_RUN}${RESET} GitHub から dotfiles を取得中..."
     local git_dir
     git_dir=$(_git_dotfiles)
     if [[ -n "$git_dir" ]]; then
-      echo -e "\r  ${GREEN}✔${RESET} GitHub から dotfiles を取得しました      "
+      echo -e "\r  ${GREEN}${ICON_OK}${RESET} GitHub から dotfiles を取得しました${CLR}"
       _print_inheritable_configs "$git_dir"
       # かつてこのリポジトリは niri 専用で .config/hypr を持たなかった。
       # 現在は含まれているためこの警告は通常発火しないが、リポジトリ側の
@@ -1839,7 +1904,7 @@ step_config_source() {
         print_warn "このリポジトリには .config/hypr が無いため、Hyprland 本体の設定はパッケージ既定になります（Waybar などの周辺設定は引き継がれます）。"
       fi
     else
-      echo -e "\r  ${YELLOW}⚠${RESET} GitHub から dotfiles を取得できませんでした"
+      echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} GitHub から dotfiles を取得できませんでした${CLR}"
       print_warn "引き継ぎなし（既定設定のみ）に切り替えます。ネットワークまたはリポジトリURLを確認してください。"
       CONFIG[config_source]="none"
     fi
@@ -1862,7 +1927,7 @@ step_fonts() {
   # 日本語環境専用: 日本語表示に必須のフォントを自動インストール
   local pkgs=(noto-fonts noto-fonts-cjk noto-fonts-emoji)
   print_ok "日本語フォントを自動インストール:"
-  echo -e "    ${GRAY}• noto-fonts（欧文）/ noto-fonts-cjk（日本語）/ noto-fonts-emoji（絵文字）${RESET}"
+  echo -e "    ${GRAY}${ICON_BULLET} noto-fonts（欧文）/ noto-fonts-cjk（日本語）/ noto-fonts-emoji（絵文字）${RESET}"
 
   # 高品質フォント（Adobe 源ノ）: 日本語特化のため固定で導入
   pkgs+=(adobe-source-han-sans-jp-fonts adobe-source-han-serif-jp-fonts)
@@ -2049,74 +2114,149 @@ step_extra_packages() {
 # 設定サマリー表示
 # ============================================
 
-show_summary() {
-  print_step "インストール設定サマリー"
-
-  echo -e "  ${BOLD}ディスク      :${RESET} ${CONFIG[disk]}"
-  echo -e "  ${BOLD}パーティション :${RESET} ${CONFIG[partition_scheme]}"
-  echo -e "  ${BOLD}ファイルシステム:${RESET} ${CONFIG[fs_type]}"
-  echo -e "  ${BOLD}ホスト名      :${RESET} ${CONFIG[hostname]}"
-  echo -e "  ${BOLD}タイムゾーン  :${RESET} ${CONFIG[timezone]}"
-  echo -e "  ${BOLD}Windows 共存  :${RESET} $([[ "${CONFIG[dualboot_windows]:-no}" == "yes" ]] && echo "する（起動時に選択・時刻を Windows に合わせる）" || echo "しない（時刻は UTC・推奨）")"
-  echo -e "  ${BOLD}ロケール      :${RESET} ${CONFIG[locale]}"
-  echo -e "  ${BOLD}キーマップ    :${RESET} ${CONFIG[keymap]}"
-  if [[ "${CONFIG[japanese_env]}" == "yes" ]]; then
-    echo -e "  ${BOLD}IME           :${RESET} ${CONFIG[jp_ime]:-none}"
-  fi
-  if [[ -n "${CONFIG[font_pkgs]}" ]]; then
-    echo -e "  ${BOLD}フォント      :${RESET} ${CONFIG[font_pkgs]}"
-  fi
-  echo -e "  ${BOLD}ファームウェア :${RESET} ${CONFIG[boot_mode]}"
-  echo -e "  ${BOLD}ブートローダー :${RESET} ${CONFIG[bootloader]}"
-  echo -e "  ${BOLD}WiFi バックエンド:${RESET} ${CONFIG[wifi_backend]}"
-  echo -e "  ${BOLD}systemd-resolved:${RESET} ${CONFIG[use_resolved]}"
-  echo -e "  ${BOLD}ミラー          :${RESET} reflector (Japan・固定)"
-  echo -e "  ${BOLD}デスクトップ  :${RESET} ${CONFIG[desktop]}"
-  [[ "${CONFIG[desktop]}" == "kde" ]] && \
-    echo -e "  ${BOLD}KDE アプリ規模 :${RESET} ${CONFIG[kde_apps]}"
-  echo -e "  ${BOLD}DM            :${RESET} ${CONFIG[dm]:-none}"
-  # 設定の引き継ぎ元を日本語で表示する（host/git/none のままだと分かりにくい）
-  local _cfgsrc_label
-  case "${CONFIG[config_source]:-host}" in
-    host)    _cfgsrc_label="ホストPCの設定" ;;
-    git)     _cfgsrc_label="GitHub (${ESCA_DOTFILES_REPO##*/})" ;;
-    *)       _cfgsrc_label="なし（既定設定のみ）" ;;
+# 設定値（内部コード）を画面表示用の日本語に変換する。
+# 引数1: 種類 / 引数2: 値（省略時は CONFIG[種類]）
+# 【重要】確認画面や各ステップの表示に auto_noswap・uefi・yes のような内部値を
+# そのまま出さないこと。読み取るのに一手間かかり、確認画面の意味が薄れる。
+_label() {
+  local kind="$1" v="${2-${CONFIG[$1]:-}}"
+  case "$kind:$v" in
+    partition_scheme:auto_noswap) echo "自動（EFI 512M + /・swap なし）" ;;
+    partition_scheme:auto_swap)   echo "自動（EFI 512M + swap + /）" ;;
+    partition_scheme:manual)      echo "手動（fdisk）" ;;
+    boot_mode:uefi)               echo "UEFI" ;;
+    boot_mode:bios)               echo "BIOS（レガシー）" ;;
+    bootloader:systemd-boot)      echo "systemd-boot" ;;
+    bootloader:grub)              echo "GRUB" ;;
+    desktop:none)                 echo "なし（CLI のみ）" ;;
+    desktop:kde)                  echo "KDE Plasma" ;;
+    desktop:gnome)                echo "GNOME" ;;
+    desktop:xfce)                 echo "Xfce" ;;
+    desktop:budgie)               echo "Budgie" ;;
+    desktop:cosmic)               echo "COSMIC" ;;
+    desktop:hyprland)             echo "Hyprland" ;;
+    desktop:niri)                 echo "Niri" ;;
+    kde_apps:minimal)             echo "最小" ;;
+    kde_apps:standard)            echo "標準" ;;
+    kde_apps:full)                echo "フル" ;;
+    dm:sddm)                      echo "SDDM" ;;
+    dm:gdm)                       echo "GDM" ;;
+    dm:lightdm)                   echo "LightDM" ;;
+    dm:cosmic-greeter)            echo "COSMIC Greeter" ;;
+    dm:greetd)                    echo "greetd（TUI）" ;;
+    dm:none)                      echo "なし（TTY から起動）" ;;
+    gpu_driver:nvidia)            echo "NVIDIA（nvidia-open）" ;;
+    gpu_driver:nouveau)           echo "NVIDIA（nouveau）" ;;
+    gpu_driver:amdgpu)            echo "AMD" ;;
+    gpu_driver:intel)             echo "Intel" ;;
+    gpu_driver:virtual)           echo "仮想環境用" ;;
+    gpu_driver:none)              echo "導入しない" ;;
+    wifi_backend:iwd)             echo "iwd" ;;
+    wifi_backend:wpa_supplicant)  echo "wpa_supplicant" ;;
+    wifi_backend:none)            echo "なし（有線のみ）" ;;
+    config_source:host)           echo "ホストPCの設定" ;;
+    config_source:git)            echo "GitHub（${ESCA_DOTFILES_REPO##*/}）" ;;
+    config_source:none)           echo "なし（既定設定のみ）" ;;
+    fs_type:*)                    echo "$v" ;;
+    sudo:yes)                     echo "管理者" ;;
+    sudo:nopasswd)                echo "管理者・パスワード不要" ;;
+    sudo:*)                       echo "一般" ;;
+    *)                            echo "$v" ;;
   esac
-  echo -e "  ${BOLD}設定の引き継ぎ :${RESET} ${_cfgsrc_label}"
-  echo -e "  ${BOLD}GPU ドライバ   :${RESET} ${CONFIG[gpu_driver]}"
-  echo -e "  ${BOLD}base-devel    :${RESET} ${CONFIG[extra_base_devel]}"
-  echo -e "  ${BOLD}AUR ヘルパー   :${RESET} ${CONFIG[aur_helper]}"
-  echo -e "  ${BOLD}Google Chrome :${RESET} ${CONFIG[install_chrome]:-no}"
-  echo -e "  ${BOLD}yt-fzf-sh     :${RESET} ${CONFIG[install_ytfzf]:-no}"
-  echo -e "  ${BOLD}OpenSSH       :${RESET} ${CONFIG[extra_ssh]}"
-  echo -e "  ${BOLD}ufw (FW)      :${RESET} ${CONFIG[extra_ufw]}"
-  echo -e "  ${BOLD}zram          :${RESET} ${CONFIG[extra_zram]}"
-  echo -e "  ${BOLD}fstrim.timer  :${RESET} ${CONFIG[extra_fstrim]:-no}"
-  if [[ "${CONFIG[desktop]:-none}" != "none" ]]; then
-    echo -e "  ${BOLD}LibreOffice   :${RESET} ${CONFIG[install_office]:-no}"
-  fi
-  if [[ "${CONFIG[virt_env]}" != "none" ]]; then
-    echo -e "  ${BOLD}仮想環境      :${RESET} ${CONFIG[virt_env]} (ゲストツール自動有効化)"
-  fi
-  if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
-    echo -e "  ${BOLD}ドライラン    :${RESET} ${RED}有効 (実行はスキップされます)${RESET}"
-  fi
-  [[ -n "${CONFIG[extra_pkgs]}" ]] && \
-    echo -e "  ${BOLD}追加パッケージ :${RESET} ${CONFIG[extra_pkgs]}"
+}
+
+# 配列を区切り文字でつないで出す（空なら「なし」）。引数1: 区切り / 以降: 要素
+# IFS は1バイト目しか使われないため、「、」のような全角の区切りはこれで行う。
+_join() {
+  local sep="$1"; shift
+  [[ $# -eq 0 ]] && { echo "なし"; return; }
+  local out="$1"; shift
+  local x
+  for x in "$@"; do out+="${sep}${x}"; done
+  echo "$out"
+}
+
+# 確認画面。
+# 【重要】縦に長くしないこと。以前は約35行あり、下に修正メニューが続くため、
+# 最も大事な「どのディスクを消すか」が画面の上へ流れて見えなくなっていた。
+# 固定の項目は1行にまとめ、消去されるディスクは警告の直前（画面の一番下）に置く。
+show_summary() {
+  print_step "インストール内容の確認"
+
+  local sec="${CYAN}${BOLD}" r="${RESET}"
+
+  echo -e "  ${sec}システム${r}"
+  _kv "ホスト名" "${CONFIG[hostname]}"
+  local de
+  de=$(_label desktop)
+  [[ "${CONFIG[desktop]}" == "kde" ]] && de+="（$(_label kde_apps)）"
+  [[ "${CONFIG[desktop]}" != "none" ]] && de+=" / ログイン画面: $(_label dm)"
+  _kv "デスクトップ" "$de"
+  local gpu
+  gpu=$(_label gpu_driver)
+  [[ "${CONFIG[virt_env]:-none}" != "none" ]] && gpu+="（${CONFIG[virt_env]}・ゲストツール導入）"
+  _kv "GPU" "$gpu"
+  _kv "Wi-Fi" "$(_label wifi_backend)"
+  _kv "設定の引き継ぎ" "$(_label config_source)"
+
+  # ユーザー
+  local users_str="" entry
   if [[ "${CONFIG[users_count]:-0}" -gt 0 ]]; then
-    echo -e "  ${BOLD}ユーザー      :${RESET}"
     while IFS= read -r entry; do
       [[ -z "$entry" ]] && continue
       parse_users_line "$entry"
-      echo -e "    ${CYAN}•${RESET} ${uname}  sudo: ${usudo}  shell: ${ushell}"
+      [[ -n "$users_str" ]] && users_str+=", "
+      users_str+="${uname}（$(_label sudo "$usudo")・${ushell}）"
     done <<< "${CONFIG[users]}"
   else
-    echo -e "  ${BOLD}ユーザー      :${RESET} root のみ"
+    users_str="root のみ"
+  fi
+  _kv "ユーザー" "$users_str"
+
+  # 追加ソフト（する／しない を1行ずつにまとめる）
+  local on=() off=()
+  local -a items=(
+    "install_chrome|Chrome" "install_ytfzf|yt-fzf" "aur_helper|yay"
+    "install_office|LibreOffice" "extra_ssh|OpenSSH" "extra_ufw|ufw"
+  )
+  local it key name val
+  for it in "${items[@]}"; do
+    key="${it%%|*}"; name="${it##*|}"; val="${CONFIG[$key]:-no}"
+    # LibreOffice はデスクトップ無しでは選択肢自体が出ないので表示しない
+    [[ "$key" == "install_office" && "${CONFIG[desktop]}" == "none" ]] && continue
+    if [[ "$val" == "no" || "$val" == "none" ]]; then off+=("$name"); else on+=("$name"); fi
+  done
+  echo ""
+  echo -e "  ${sec}追加ソフト${r}"
+  _kv "導入する" "$(_join "、" "${on[@]}")"
+  _kv "導入しない" "$(_join "、" "${off[@]}")"
+  [[ -n "${CONFIG[extra_pkgs]}" ]] && _kv "追加パッケージ" "${CONFIG[extra_pkgs]}"
+
+  # 日本語環境として固定している項目は1行に要約する（個別に選ぶ項目ではないため）
+  echo ""
+  echo -e "  ${GRAY}固定: ${CONFIG[locale]}・${CONFIG[keymap]}・Mozc・日本語フォント・zram・TRIM・国内ミラー${RESET}"
+
+  # 消去されるディスクは一番下に置き、警告と並べる
+  local disk_info=""
+  disk_info=$(lsblk -dno SIZE,MODEL "${CONFIG[disk]}" 2>/dev/null | xargs || true)
+  echo ""
+  echo -e "  ${sec}インストール先${r}"
+  _kv "ディスク" "${CONFIG[disk]}${disk_info:+（${disk_info}）}"
+  local part
+  part=$(_label partition_scheme)
+  [[ "${CONFIG[partition_scheme]}" != "manual" ]] && part+=" / ${CONFIG[fs_type]}"
+  _kv "パーティション" "$part"
+  _kv "起動方式" "$(_label boot_mode) / $(_label bootloader)"
+  if [[ "${CONFIG[dualboot_windows]:-no}" == "yes" ]]; then
+    _kv "Windows 共存" "する（起動時に選択・時刻を Windows に合わせる）"
   fi
 
   echo ""
-  print_warn "上記の設定でインストールを開始します。"
-  print_warn "ディスク ${CONFIG[disk]} の全データが消去されます！"
+  if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
+    print_warn "ドライラン: ディスクには書き込みません"
+  else
+    print_warn "${BOLD}${CONFIG[disk]} の全データが消去されます${RESET}"
+  fi
 }
 
 # ============================================
@@ -2210,6 +2350,12 @@ do_partition() {
   # カーネルにパーティションテーブル再読込を通知
   # partprobe だけでは不十分な場合があるため複数手段を使う
   run_cmd "パーティションテーブル再読込 (partprobe)" partprobe "$disk"
+  # ドライランではパーティションを作っていないので、認識待ちをしない
+  # （空のディスクだと 30 秒待った末に「認識されません」で止まっていた）
+  if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
+    return 0
+  fi
+
   # blockdev --rereadpt はビジー状態でエラーになることがあるため無視
   blockdev --rereadpt "$disk" 2>/dev/null || true
   udevadm settle 2>/dev/null || true
@@ -2488,12 +2634,12 @@ do_format_and_mount() {
 
 step_check_network() {
   print_step "ネットワーク確認"
-  echo -ne "  ${CYAN}…${RESET} インターネット接続を確認中..."
+  echo -ne "  ${CYAN}${ICON_RUN}${RESET} インターネット接続を確認中..."
   # ICMP を遮断する環境があるため、ping が失敗しても HTTPS 疎通を確認する
   if ping -c1 -W3 archlinux.org &>/dev/null || curl -sf -m5 https://archlinux.org -o /dev/null; then
-    echo -e "\r  ${GREEN}✔${RESET} インターネット接続OK"
+    echo -e "\r  ${GREEN}${ICON_OK}${RESET} インターネット接続OK${CLR}"
   else
-    echo -e "\r  ${RED}✘${RESET} インターネットに接続できません"
+    echo -e "\r  ${RED}${ICON_ERR}${RESET} インターネットに接続できません${CLR}"
     echo ""
     print_warn "有線接続の場合: ケーブルを確認してください"
     print_warn "WiFi の場合  : iwctl で接続してください"
@@ -2509,29 +2655,29 @@ step_check_network() {
       exit 1
     fi
     # 再確認
-    echo -ne "  ${CYAN}…${RESET} 再確認中..."
+    echo -ne "  ${CYAN}${ICON_RUN}${RESET} 再確認中..."
     if ping -c1 -W5 archlinux.org &>/dev/null || curl -sf -m8 https://archlinux.org -o /dev/null; then
-      echo -e "\r  ${GREEN}✔${RESET} インターネット接続OK"
+      echo -e "\r  ${GREEN}${ICON_OK}${RESET} インターネット接続OK${CLR}"
     else
-      echo -e "\r  ${RED}✘${RESET} まだ接続できません。終了します。"
+      echo -e "\r  ${RED}${ICON_ERR}${RESET} まだ接続できません。終了します。${CLR}"
       exit 1
     fi
   fi
 
   # Live ISO の時刻を NTP で同期
   # （狂ったままだと pacman の署名検証が失敗することがある）
-  echo -ne "  ${CYAN}…${RESET} NTP 時刻同期中..."
+  echo -ne "  ${CYAN}${ICON_RUN}${RESET} NTP 時刻同期中..."
   timedatectl set-ntp true
   # 最大10秒待って同期を確認
   local i
   for i in {1..10}; do
     if timedatectl status 2>/dev/null | grep -q "synchronized: yes"; then
-      echo -e "\r  ${GREEN}✔${RESET} NTP 時刻同期完了: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+      echo -e "\r  ${GREEN}${ICON_OK}${RESET} NTP 時刻同期完了: $(date '+%Y-%m-%d %H:%M:%S %Z')${CLR}"
       return
     fi
     sleep 1
   done
-  echo -e "\r  ${YELLOW}⚠${RESET} NTP 同期タイムアウト（続行します）"
+  echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} NTP 同期タイムアウト（続行します）${CLR}"
   echo -e "    現在時刻: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 }
 
@@ -2554,7 +2700,7 @@ step_network() {
     "wpa_supplicant（古くから使われている実装・互換性重視）") CONFIG[wifi_backend]="wpa_supplicant" ;;
     "なし（有線のみ・後から設定）")                          CONFIG[wifi_backend]="none" ;;
   esac
-  print_ok "WiFi バックエンド: ${CONFIG[wifi_backend]}"
+  print_ok "Wi-Fi: $(_label wifi_backend)"
 
   # systemd-resolved: 推奨のため固定で有効化
   # （DNS キャッシュ・DNSSEC。NetworkManager と自動連携する）
@@ -2606,7 +2752,7 @@ do_mirrorlist() {
   # 日本国内・HTTPS・最終同期24時間以内・速度順 上位8件
   local desc="reflector 実行（Japan・速度順）" ok="no"
   if command -v reflector &>/dev/null; then
-    echo -ne "  ${CYAN}…${RESET} ${desc}..."
+    echo -ne "  ${CYAN}${ICON_RUN}${RESET} ${desc}..."
     if _exec_timed "$desc" reflector --country "${CONFIG[mirror_country]:-Japan}" \
          --protocol https \
          --age 24 \
@@ -2615,9 +2761,9 @@ do_mirrorlist() {
          --save "$ml" \
        && grep -q '^Server' "$ml"; then
       ok="yes"
-      echo -e "\r  ${GREEN}✔${RESET} ${desc}                              "
+      echo -e "\r  ${GREEN}${ICON_OK}${RESET} ${desc}${CLR}"
     else
-      echo -e "\r  ${YELLOW}⚠${RESET} ${desc} — 失敗または該当ミラー0件                    "
+      echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} ${desc} ${DASH} 失敗または該当ミラー0件${CLR}"
     fi
   fi
 
@@ -3788,12 +3934,12 @@ do_aur_helper() {
   # chroot 内の AUR 接続確認（AUR/Chrome 用。yt-fzf は GitHub なので clone 時に個別判定）
   local aur_ok="yes"
   if [[ "$helper" != "none" || "$want_chrome" == "yes" ]]; then
-    echo -ne "  ${CYAN}…${RESET} chroot 内の AUR 接続を確認中..."
+    echo -ne "  ${CYAN}${ICON_RUN}${RESET} chroot 内の AUR 接続を確認中..."
     if arch-chroot /mnt git ls-remote "https://aur.archlinux.org/google-chrome.git" &>/dev/null; then
-      echo -e "\r  ${GREEN}✔${RESET} chroot 内の AUR 接続OK"
+      echo -e "\r  ${GREEN}${ICON_OK}${RESET} chroot 内の AUR 接続OK${CLR}"
     else
       aur_ok="no"
-      echo -e "\r  ${YELLOW}⚠${RESET} chroot 内で AUR に接続できません — AUR/Chrome はスキップします"
+      echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} chroot 内で AUR に接続できません ${DASH} AUR/Chrome はスキップします${CLR}"
       print_warn "DNS（/etc/resolv.conf）の同期不良などが原因の可能性があります。"
       _aur_manual_hint "$helper"
     fi
@@ -5014,7 +5160,7 @@ do_desktop() {
 
   # STEP_TOTAL に計上済みのため、スキップ時もステップ表示を先に行う
   # （早期 return より前に print_step しないと [n/N] の番号がずれる）
-  print_step "デスクトップ環境のインストール: ${CONFIG[desktop]}"
+  print_step "デスクトップ環境のインストール: $(_label desktop)"
 
   # dry_run 時は /mnt がマウントされていないためスキップ
   if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
@@ -6941,7 +7087,7 @@ do_display_manager() {
   local dm="${CONFIG[dm]}"
   [[ "$dm" == "none" ]] && { print_ok "DM なし: TTY から手動起動"; return; }
 
-  print_step "ディスプレイマネージャーのセットアップ: ${dm}"
+  print_step "ログイン画面 (DM) のセットアップ: $(_label dm)"
 
   case "$dm" in
     sddm)
@@ -7146,25 +7292,36 @@ do_cleanup() {
   fi
 
   # swapoff は swap がない場合でも失敗しないよう直接実行
-  echo -ne "  ${CYAN}…${RESET} swap 無効化..."
-  swapoff -a 2>/dev/null && echo -e "\r  ${GREEN}✔${RESET} swap 無効化   " || \
-    echo -e "\r  ${GREEN}✔${RESET} swap なし（スキップ）"
+  # 【重要】ドライランでは swapoff しないこと（Live 環境やホストの swap が止まる）
+  echo -ne "  ${CYAN}${ICON_RUN}${RESET} swap 無効化..."
+  if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
+    echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} swap 無効化 (ドライラン - スキップ)${CLR}"
+  elif [[ -n "${CONFIG[swap_part]}" ]] && swapoff "${CONFIG[swap_part]}" 2>/dev/null; then
+    echo -e "\r  ${GREEN}${ICON_OK}${RESET} swap 無効化${CLR}"
+  else
+    echo -e "\r  ${GREEN}${ICON_OK}${RESET} swap なし（スキップ）${CLR}"
+  fi
   # インストールログを新システムに保存
   # （/tmp のログは再起動で消えるため、初回起動後のトラブルシュート用に残す）
   if [[ "${CONFIG[dry_run]}" != "yes" && -f "${CONFIG[log_file]}" && -d /mnt/var/log ]]; then
+    # 完了画面で再表示する注意事項を、再起動後も読めるようログの末尾に残す
+    if [[ "${#NOTICES[@]}" -gt 0 ]]; then
+      { echo ""; echo "--- 確認が必要なこと ---"; printf '%s\n' "${NOTICES[@]}"; } \
+        >> "${CONFIG[log_file]}" 2>/dev/null || true
+    fi
     cp "${CONFIG[log_file]}" /mnt/var/log/ 2>/dev/null \
       && print_ok "インストールログを保存: /var/log/$(basename "${CONFIG[log_file]}")" \
       || print_warn "ログのコピーに失敗しました（インストールには影響ありません）"
   fi
 
   # インストール自体は完了しているため、アンマウント失敗で exit しない
-  echo -ne "  ${CYAN}…${RESET} アンマウント..."
+  echo -ne "  ${CYAN}${ICON_RUN}${RESET} アンマウント..."
   if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
-    echo -e "\r  ${YELLOW}⚠${RESET} アンマウント (ドライラン - スキップ)"
+    echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} アンマウント (ドライラン - スキップ)${CLR}"
   elif umount -R /mnt >> "${CONFIG[log_file]}" 2>&1; then
-    echo -e "\r  ${GREEN}✔${RESET} アンマウント   "
+    echo -e "\r  ${GREEN}${ICON_OK}${RESET} アンマウント${CLR}"
   else
-    echo -e "\r  ${YELLOW}⚠${RESET} アンマウントに失敗（インストール自体は完了しています）"
+    echo -e "\r  ${YELLOW}${ICON_WARN}${RESET} アンマウントに失敗（インストール自体は完了しています）${CLR}"
     print_warn "再起動前に手動で実行してください: umount -R /mnt"
   fi
 }
@@ -7177,7 +7334,7 @@ run_install() {
   clear
   echo ""
   echo -e "  ${YELLOW}${BOLD}(o)${RESET} ${CYAN}${BOLD}${OS_NAME}${RESET}  ${GRAY}│${RESET}  ${BOLD}インストール実行中${RESET}"
-  echo -e "  ${CYAN}$(printf '━%.0s' {1..48})${RESET}"
+  echo -e "  ${CYAN}$(_rule "$RULE_H" 48)${RESET}"
   echo ""
 
   # --- 進捗カウンター用の総ステップ数を算出（print_step が [n/N] を表示）---
@@ -7245,8 +7402,8 @@ run_install() {
   STEP_TOTAL=0
 
   echo ""
-  echo -e "  ${GREEN}${BOLD}✔ インストール完了！${RESET}  ${GRAY}再起動して日本語環境をお楽しみください${RESET}"
-  echo -e "  ${GREEN}$(printf '━%.0s' {1..48})${RESET}"
+  echo -e "  ${GREEN}${BOLD}${ICON_OK} インストール完了！${RESET}  ${GRAY}再起動して日本語環境をお楽しみください${RESET}"
+  echo -e "  ${GREEN}$(_rule "$RULE_H" 48)${RESET}"
   echo ""
   # ステップ別所要時間サマリー
   if [[ "${#STEP_LOG[@]}" -gt 0 ]]; then
@@ -7254,12 +7411,30 @@ run_install() {
     for _entry in "${STEP_LOG[@]}"; do
       _sname="${_entry%|*}"
       _ssec="${_entry##*|}"
-      echo -e "    ${GRAY}•${RESET} ${_sname}: $(( _ssec / 60 ))分$(( _ssec % 60 ))秒"
+      echo -e "    ${GRAY}${ICON_BULLET}${RESET} ${_sname}: $(( _ssec / 60 ))分$(( _ssec % 60 ))秒"
     done
     echo -e "  ${BOLD}総所要時間: $(( (SECONDS - INSTALL_START) / 60 ))分$(( (SECONDS - INSTALL_START) % 60 ))秒${RESET}"
     echo ""
   fi
   echo -e "  再起動コマンド: ${BOLD}reboot${RESET}"
+
+  # インストール中に出た注意事項の再表示（画面消去で流れてしまうため）
+  if [[ "${#NOTICES[@]}" -gt 0 ]]; then
+    echo ""
+    echo -e "${YELLOW}${BOLD}  ── 確認が必要なこと（${#NOTICES[@]}件）──${RESET}"
+    local _n _i=0
+    for _n in "${NOTICES[@]}"; do
+      _i=$(( _i + 1 ))
+      if [[ "$_i" -gt 12 ]]; then
+        echo -e "  ${GRAY}ほか $(( ${#NOTICES[@]} - 12 ))件はログを確認してください${RESET}"
+        break
+      fi
+      echo -e "  ${YELLOW}${ICON_WARN}${RESET} ${_n}"
+    done
+    if [[ "${CONFIG[dry_run]}" != "yes" ]]; then
+      echo -e "  ${GRAY}（同じ内容はインストール先の /var/log/$(basename "${CONFIG[log_file]}") にも残っています）${RESET}"
+    fi
+  fi
 
   # 日本語入力のヒント（IME を導入した場合）
   if [[ "${CONFIG[jp_ime]:-none}" != "none" ]]; then
@@ -7339,14 +7514,14 @@ main() {
   done
 
   if [[ "${#missing_pkgs[@]}" -gt 0 ]]; then
-    echo -e "${YELLOW}⚠ 以下のパッケージが不足しています: ${missing_pkgs[*]}${RESET}"
+    echo -e "${YELLOW}${ICON_WARN} 以下のパッケージが不足しています: ${missing_pkgs[*]}${RESET}"
     echo -e "  自動インストールします..."
     pacman -Sy --noconfirm "${missing_pkgs[@]}" || {
-      echo -e "${RED}✘ 必要パッケージのインストールに失敗しました。${RESET}"
+      echo -e "${RED}${ICON_ERR} 必要パッケージのインストールに失敗しました。${RESET}"
       echo "  手動で実行してください: pacman -S ${missing_pkgs[*]}"
       exit 1
     }
-    echo -e "${GREEN}✔ 必要パッケージをインストールしました。${RESET}"
+    echo -e "${GREEN}${ICON_OK} 必要パッケージをインストールしました。${RESET}"
   fi
 
   # ブートモードを早期検出（step_partition_scheme で参照するため）
@@ -7358,7 +7533,11 @@ main() {
   # 仮想環境検出
   local virt=""
   if command -v systemd-detect-virt &>/dev/null; then
-    virt=$(systemd-detect-virt 2>/dev/null || echo "none")
+    # 【重要】「$(systemd-detect-virt || echo none)」と書かないこと。
+    # 実機では systemd-detect-virt 自身が "none" を出力したうえで非0を返すため、
+    # "none" が2行重なった値になり、実機なのに仮想環境として扱われていた。
+    virt=$(systemd-detect-virt 2>/dev/null) || virt="none"
+    [[ -n "$virt" ]] || virt="none"
   else
     virt="none"
   fi
@@ -7401,35 +7580,47 @@ main() {
   # 設定の修正ループ
   while true; do
     echo ""
+    # 【重要】ここで修正項目を全部並べないこと。11項目のメニューが確認画面の下に
+    # 続くと、確認画面の上半分（インストール先ディスク等）が画面外へ流れる。
+    # まず3択だけを出し、修正を選んだときに項目を出す。
     local action
-    action=$(select_from_list "次のアクションを選択してください:" \
-      "このままインストールを実行する" \
-      "ディスクを変更する" \
-      "パーティション構成・ファイルシステムを変更する" \
-      "システム設定を変更する（ホスト名・デュアルブート・GPUなど）" \
-      "ユーザー設定を変更する" \
-      "ブートローダーを変更する" \
-      "デスクトップ環境を変更する" \
-      "設定の引き継ぎを変更する（ホストPC / GitHub / なし）" \
-      "ネットワーク設定を変更する" \
-      "追加パッケージを変更する" \
+    action=$(select_from_list "この内容でよろしいですか？" \
+      "インストールを実行する" \
+      "設定を修正する" \
       "キャンセルして終了する")
 
     case "$action" in
-      "このままインストールを実行する") break ;;
-      "ディスクを変更する")                                   step_disk ;;
-      "パーティション構成・ファイルシステムを変更する")       step_partition_scheme ;;
-      "システム設定を変更する（ホスト名・デュアルブート・GPUなど）") step_system ;;
-      "ユーザー設定を変更する")                     step_users ;;
-      "ブートローダーを変更する")                   step_bootloader ;;
-      "デスクトップ環境を変更する")                 step_desktop ;;
-      "設定の引き継ぎを変更する（ホストPC / GitHub / なし）") step_config_source ;;
-      "ネットワーク設定を変更する")                 step_network ;;
-      "追加パッケージを変更する")                   step_extra_packages ;;
+      "インストールを実行する") break ;;
       "キャンセルして終了する")
         echo -e "\n  インストールを中断しました。"
         exit 0
         ;;
+    esac
+
+    print_step "設定の修正"
+    local item
+    item=$(select_from_list "修正する項目を選択してください:" \
+      "ディスク" \
+      "パーティション構成・ファイルシステム" \
+      "システム設定（ホスト名・Windows 共存・GPU）" \
+      "ユーザー" \
+      "ブートローダー" \
+      "デスクトップ環境・ログイン画面" \
+      "設定の引き継ぎ（ホストPC / GitHub / なし）" \
+      "ネットワーク（Wi-Fi）" \
+      "追加ソフト・追加パッケージ" \
+      "戻る（修正しない）")
+
+    case "$item" in
+      "ディスク")                                   step_disk ;;
+      "パーティション構成・ファイルシステム")       step_partition_scheme ;;
+      "システム設定（ホスト名・Windows 共存・GPU）") step_system ;;
+      "ユーザー")                                   step_users ;;
+      "ブートローダー")                             step_bootloader ;;
+      "デスクトップ環境・ログイン画面")             step_desktop ;;
+      "設定の引き継ぎ（ホストPC / GitHub / なし）") step_config_source ;;
+      "ネットワーク（Wi-Fi）")                      step_network ;;
+      "追加ソフト・追加パッケージ")                 step_extra_packages ;;
     esac
 
     # 修正後にサマリーを再表示
