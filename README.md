@@ -116,6 +116,7 @@ KDE を選んだ場合は、さらに導入規模を選べます（最小 約500
 - **GPU ドライバー**: NVIDIA / Nouveau / AMD / Intel / 仮想環境。搭載 GPU を検出して既定値を提示します
 - **WiFi バックエンド**: iwd（推奨） / wpa_supplicant / なし
 - **追加パッケージ**: OpenSSH、LibreOffice、Google Chrome、yt-fzf-sh、yay、ufw、zram
+- **定期メンテナンス（自動）**: パッケージキャッシュの掃除（`paccache.timer`・週1回）、ミラーの選び直し（`reflector.timer`・週1回。結果が空なら既存のリストを維持）、ファームウェア情報の更新（`fwupd-refresh.timer`・実機のみ）
 
 ---
 
@@ -256,6 +257,19 @@ Nerd Font 系のパッケージが入っていない可能性があります。�
 - **エラー行番号は `BASH_LINENO[0]`。** トラップ内の `$LINENO` はトラップ自身の行を指します。
 - **SDDM の QML は QtQuick のみで書く。** Controls を使うとスタイルプラグインが無い環境で白画面になります。
 - **`/mnt` への書き込みは必ず `run_cmd` を通す。** 直接書くとドライランのガードが効きません。
+
+### テスト
+
+push のたびに GitHub Actions（`.github/workflows/check.yml`）で次を自動実行します。結果はリポジトリの「Actions」タブで確認できます。
+
+| テスト | 内容 | 手元で動かす場合 |
+|---|---|---|
+| 構文・shellcheck | `bash -n` と shellcheck（警告レベル） | `shellcheck -S warning install.sh build-iso.sh` |
+| 単体テスト | GPU 判定・initramfs 設定・確認画面の幅など | `bash tests/unit.sh` |
+| ドライランの通しテスト | 回答を自動入力して `--dry-run` を最後まで実行 | `sudo bash tests/dryrun.sh` |
+| ログイン画面の描画 | SDDM テーマを実際に描画し、表示と操作を確認 | `python3 tests/sddm_render.py --out sddm.png`（要 PySide6） |
+
+`install.sh` は `source` しても `main` を実行しないので、テストから関数を直接呼べます。
 
 ---
 

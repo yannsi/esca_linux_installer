@@ -1,0 +1,80 @@
+# push のたびに install.sh / build-iso.sh を自動で確認する。
+# 結果は GitHub の「Actions」タブで見られる（失敗するとメールでも通知される）。
+name: チェック
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 構文・shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # 手元と同じ版の shellcheck を使う（版が違うと指摘内容が変わるため）
+      - run: pip install shellcheck-py==0.11.0.1
+      - name: bash の構文チェック
+        run: |
+          bash -n install.sh
+          bash -n build-iso.sh
+          bash -n tests/unit.sh
+          bash -n tests/dryrun.sh
+      - name: shellcheck（警告レベル）
+        run: |
+          shellcheck -S warning install.sh build-iso.sh
+          shellcheck -x -P SCRIPTDIR -S warning tests/unit.sh tests/dryrun.sh
+
+  unit:
+    name: 単体テスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/unit.sh
+
+  dryrun:
+    name: ドライランの通しテスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # インストール先の候補になるディスクを用意する（ドライランなので書き込まれない）
+      - name: テスト用ディスク（loop デバイス）を用意
+        run: |
+          truncate -s 20G /tmp/esca-test-disk.img
+          sudo losetup -f --show /tmp/esca-test-disk.img
+      - name: ドライラン
+        env:
+          ESCA_TEST_ALLOW_LOOP: "1"
+        run: sudo -E bash tests/dryrun.sh 1
+
+  sddm:
+    name: ログイン画面（SDDM テーマ）の描画
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 描画に必要なライブラリと日本語フォント
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - run: pip install PySide6-Essentials==6.11.2
+      - name: 描画テスト
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tests/sddm_render.py --out sddm-login.png
+      # 描画結果の画像を Actions の画面からダウンロードできるようにする
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sddm-login-screenshot
+          path: sddm-login.png
+          if-no-files-found: ignore

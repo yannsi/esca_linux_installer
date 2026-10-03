@@ -1158,7 +1158,13 @@ step_disk() {
     devname=$(basename "$devpath")
 
     # loop, ram, sr, zram デバイスを除外
-    [[ "$devname" =~ ^(loop|ram|sr|zram) ]] && continue
+    # （自動テスト用: ドライラン かつ ESCA_TEST_ALLOW_LOOP=1 のときだけ loop を候補に残す。
+    #   ドライランはディスクに一切書き込まないため、この例外で実害は出ない）
+    if [[ "$devname" =~ ^loop && "$DRY_RUN" == "yes" && "${ESCA_TEST_ALLOW_LOOP:-0}" == "1" ]]; then
+      :
+    elif [[ "$devname" =~ ^(loop|ram|sr|zram) ]]; then
+      continue
+    fi
 
     # サイズが 0（または読み取れない）デバイスを除外
     local sectors
@@ -1314,6 +1320,42 @@ step_partition_scheme() {
   fi
 }
 
+# GPU を判定し「ドライバー名|表示名」を出力する（判定できなければ "|"）。
+# 引数1: lspci -nn の表示デバイス行（PCI クラス 03xx の行だけ） / 引数2: systemd-detect-virt の出力
+#
+# 【重要】lspci の全行に対して "ATI" などで grep してはいけない。
+# 「VGA comp-ati-ble controller」「Communic-ati-on controller」のように
+# 普通の単語に含まれるため、NVIDIA 以外の全マシン（Intel 機も仮想マシンも）が
+# AMD と誤判定されていた。mesa が入るので画面は映り、気付きにくい。
+# 判定は「表示デバイスの行」だけに絞り、単語境界で照合する。
+#
+# 【重要】仮想環境を最初に判定すること。仮想 GPU の行にもホスト側の
+# ベンダー名が出ることがあり、実機用ドライバーを入れてしまう。
+#
+# 【重要】Arch の nvidia（現 nvidia-open）は Turing（GTX 16 / RTX 20）以降専用。
+# 2025年12月の 590 系で Pascal（GTX 10）以前のサポートが外れた。
+# 古い世代に入れると起動後に画面が出ないため nouveau にする。
+# 判定は PCI デバイス ID で行う（Turing 以降は 0x1e00 以上）。
+_detect_gpu() {
+  local gpu_lines="$1" virt_kind="$2" nv_id
+  if [[ "$virt_kind" =~ ^(oracle|kvm|vmware|qemu)$ ]]; then
+    echo "virtual|仮想環境 (${virt_kind})"
+  elif grep -qi 'NVIDIA' <<< "$gpu_lines"; then
+    nv_id=$(grep -oiE '\[10de:[0-9a-f]{4}\]' <<< "$gpu_lines" | head -n1 | cut -c7-10)
+    if [[ -n "$nv_id" ]] && (( 16#$nv_id < 16#1e00 )); then
+      echo "nouveau|NVIDIA（Pascal 以前の世代）"
+    else
+      echo "nvidia|NVIDIA"
+    fi
+  elif grep -qiE 'Advanced Micro Devices|\bAMD\b|\bATI\b|Radeon' <<< "$gpu_lines"; then
+    echo "amdgpu|AMD"
+  elif grep -qi 'Intel' <<< "$gpu_lines"; then
+    echo "intel|Intel"
+  else
+    echo "|"
+  fi
+}
+
 # ============================================
 # ステップ 3: システム設定
 # ============================================
@@ -1397,45 +1439,16 @@ step_system() {
   # --- GPU ドライバーの選択 ---
   echo ""
 
-  # GPU を自動検出して推奨を提示
-  #
-  # 【重要】lspci の全行に対して "ATI" などで grep してはいけない。
-  # 「VGA comp-ati-ble controller」「Communic-ati-on controller」のように
-  # 普通の単語に含まれるため、NVIDIA 以外の全マシン（Intel 機も仮想マシンも）が
-  # AMD と誤判定されていた。mesa が入るので画面は映り、気付きにくい。
-  # 判定は「表示デバイス（PCI クラス 03xx）の行」だけに絞り、単語境界で照合する。
-  #
-  # 【重要】仮想環境を最初に判定すること。仮想 GPU の行にもホスト側の
-  # ベンダー名が出ることがあり、実機用ドライバーを入れてしまう。
-  local detected_gpu=""
-  local recommended=""
-  local gpu_lines virt_kind
-  gpu_lines=$(lspci -nn 2>/dev/null | grep -E '\[03[0-9a-f]{2}\]:' || true)
-  virt_kind=$(systemd-detect-virt 2>/dev/null || true)
-  if [[ "$virt_kind" =~ ^(oracle|kvm|vmware|qemu)$ ]]; then
-    detected_gpu="仮想環境 (${virt_kind})"
-    recommended="virtual"
-  elif grep -qi 'NVIDIA' <<< "$gpu_lines"; then
-    detected_gpu="NVIDIA"
-    recommended="nvidia"
-    # 【重要】Arch の nvidia（現 nvidia-open）は Turing（GTX 16 / RTX 20）以降専用。
-    # 2025年12月の 590 系で Pascal（GTX 10）以前のサポートが外れた。
-    # 古い世代に入れると起動後に画面が出ないため nouveau に切り替える。
-    # 判定は PCI デバイス ID で行う（Turing 以降は 0x1e00 以上）。
-    local nv_id
-    nv_id=$(grep -oiE '\[10de:[0-9a-f]{4}\]' <<< "$gpu_lines" | head -n1 | cut -c7-10)
-    if [[ -n "$nv_id" ]] && (( 16#$nv_id < 16#1e00 )); then
-      detected_gpu="NVIDIA（Pascal 以前の世代）"
-      recommended="nouveau"
-      print_warn "この NVIDIA GPU は現在の公式ドライバーの対象外のため、nouveau を使います。"
-      print_warn "プロプライエタリ版が必要な場合は、インストール後に AUR の nvidia-580xx-dkms を導入してください。"
-    fi
-  elif grep -qiE 'Advanced Micro Devices|\bAMD\b|\bATI\b|Radeon' <<< "$gpu_lines"; then
-    detected_gpu="AMD"
-    recommended="amdgpu"
-  elif grep -qi 'Intel' <<< "$gpu_lines"; then
-    detected_gpu="Intel"
-    recommended="intel"
+  # GPU を自動検出して推奨を提示（判定本体は _detect_gpu。テストから直接呼べるよう分けている）
+  local detected_gpu="" recommended="" gpu_result
+  gpu_result=$(_detect_gpu \
+    "$(lspci -nn 2>/dev/null | grep -E '\[03[0-9a-f]{2}\]:' || true)" \
+    "$(systemd-detect-virt 2>/dev/null || true)")
+  recommended="${gpu_result%%|*}"
+  detected_gpu="${gpu_result#*|}"
+  if [[ "$recommended" == "nouveau" ]]; then
+    print_warn "この NVIDIA GPU は現在の公式ドライバーの対象外のため、nouveau を使います。"
+    print_warn "プロプライエタリ版が必要な場合は、インストール後に AUR の nvidia-580xx-dkms を導入してください。"
   fi
 
   if [[ -n "$detected_gpu" ]]; then
@@ -2787,6 +2800,47 @@ do_mirrorlist() {
   grep '^Server' "$ml" | head -n 8 | sed 's/^/    /' || true
 }
 
+# initramfs のドロップイン（/etc/mkinitcpio.conf.d/10-esca.conf）の本文を出力する。
+# 追加する設定が無ければ何も出力しない。テストから直接呼べるよう分けている。
+# 引数1: ファイルシステム / 引数2: GPU ドライバー / 引数3: swap パーティション（無ければ空）
+_initramfs_dropin_body() {
+  local fs="$1" gpu="$2" swap="$3"
+  local body="" drop_kms="no" add_resume="no"
+
+  # btrfs ルート
+  [[ "$fs" == "btrfs" ]] && body+="MODULES+=(btrfs)"$'\n'
+
+  # NVIDIA: 早期 KMS 用にモジュールを入れ、kms フック（nouveau を同梱する）は外す
+  if [[ "$gpu" == "nvidia" ]]; then
+    body+="MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)"$'\n'
+    drop_kms="yes"
+  fi
+
+  # ハイバネート: swap があるときだけ resume フックを filesystems の前に入れる。
+  # 判定は partition_scheme ではなく「実際に swap があるか」で行う
+  # （do_bootloader は swap があれば resume= を渡すため、ここと揃える）。
+  # 【重要】systemd ベースの initramfs（HOOKS に systemd）では resume フックは不要。
+  # systemd 自身がカーネルの resume= を見て復帰を処理するため、追加しない。
+  [[ -n "$swap" ]] && add_resume="yes"
+
+  if [[ "$drop_kms" == "yes" || "$add_resume" == "yes" ]]; then
+    body+='_esca_hooks=()'$'\n'
+    body+='for _esca_h in "${HOOKS[@]}"; do'$'\n'
+    [[ "$drop_kms" == "yes" ]] && body+='  [[ "$_esca_h" == kms ]] && continue'$'\n'
+    [[ "$add_resume" == "yes" ]] && body+='  if [[ "$_esca_h" == filesystems && " ${HOOKS[*]} " != *" systemd "* && " ${HOOKS[*]} " != *" resume "* ]]; then _esca_hooks+=(resume); fi'$'\n'
+    body+='  _esca_hooks+=("$_esca_h")'$'\n'
+    body+='done'$'\n'
+    body+='HOOKS=("${_esca_hooks[@]}")'$'\n'
+    body+='unset _esca_hooks _esca_h'$'\n'
+  fi
+
+  # 【重要】mkinitcpio はドロップインを本体の後ろに「連結」してから読む。
+  # 呼び出し側でファイル末尾に改行を付けること（付けないと、後に続く別の
+  # ドロップインの1行目がこのファイルの最終行にくっついて壊れる）。
+  [[ -z "$body" ]] && return 0
+  printf '%s\n%s' "# Esca Linux インストーラーが生成（mkinitcpio.conf の後に読み込まれる）" "$body"
+}
+
 # ============================================
 # initramfs の設定（pacstrap より前に書く）
 # ============================================
@@ -2804,49 +2858,20 @@ do_mirrorlist() {
 #   どのパッケージも所有しないため、先に置いても pacstrap と衝突しない）
 write_initramfs_config() {
   local dropin="/etc/mkinitcpio.conf.d/10-esca.conf"
-  local body="# Esca Linux インストーラーが生成（mkinitcpio.conf の後に読み込まれる）"$'\n'
-
-  # btrfs ルート
-  if [[ "${CONFIG[fs_type]}" == "btrfs" ]]; then
-    body+="MODULES+=(btrfs)"$'\n'
-  fi
-
-  # NVIDIA: 早期 KMS 用にモジュールを入れ、kms フック（nouveau を同梱する）は外す
-  local drop_kms="no" add_resume="no"
-  if [[ "${CONFIG[gpu_driver]}" == "nvidia" ]]; then
-    body+="MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)"$'\n'
-    drop_kms="yes"
-  fi
-
-  # ハイバネート: swap があるときだけ resume フックを filesystems の前に入れる。
-  # 判定は partition_scheme ではなく「実際に swap があるか」で行う
-  # （do_bootloader は swap があれば resume= を渡すため、ここと揃える）。
-  # 【重要】systemd ベースの initramfs（HOOKS に systemd）では resume フックは不要。
-  # systemd 自身がカーネルの resume= を見て復帰を処理するため、追加しない。
-  [[ -n "${CONFIG[swap_part]}" ]] && add_resume="yes"
-
-  if [[ "$drop_kms" == "yes" || "$add_resume" == "yes" ]]; then
-    body+='_esca_hooks=()'$'\n'
-    body+='for _esca_h in "${HOOKS[@]}"; do'$'\n'
-    [[ "$drop_kms" == "yes" ]] && body+='  [[ "$_esca_h" == kms ]] && continue'$'\n'
-    [[ "$add_resume" == "yes" ]] && body+='  if [[ "$_esca_h" == filesystems && " ${HOOKS[*]} " != *" systemd "* && " ${HOOKS[*]} " != *" resume "* ]]; then _esca_hooks+=(resume); fi'$'\n'
-    body+='  _esca_hooks+=("$_esca_h")'$'\n'
-    body+='done'$'\n'
-    body+='HOOKS=("${_esca_hooks[@]}")'$'\n'
-    body+='unset _esca_hooks _esca_h'$'\n'
-  fi
+  local body
+  body=$(_initramfs_dropin_body "${CONFIG[fs_type]}" "${CONFIG[gpu_driver]}" "${CONFIG[swap_part]}")
 
   run_cmd "キーマップ・コンソールフォント設定 (vconsole.conf)" \
     bash -c "mkdir -p /mnt/etc && printf 'KEYMAP=%s\nFONT=ter-116n\n' '${CONFIG[keymap]}' > /mnt/etc/vconsole.conf"
 
   # 追加する設定が無ければドロップインは置かない
-  if [[ "$body" == *$'\n'?* ]]; then
+  if [[ -n "$body" ]]; then
     run_cmd "initramfs 設定 (mkinitcpio.conf.d)" \
-      bash -c 'mkdir -p "$(dirname "$1")" && printf "%s" "$2" > "$1"' _ "/mnt${dropin}" "$body"
+      bash -c 'mkdir -p "$(dirname "$1")" && printf "%s\n" "$2" > "$1"' _ "/mnt${dropin}" "$body"
   fi
 
   # NVIDIA: nouveau をモジュールレベルでも無効化（modconf フックで initramfs にも入る）
-  if [[ "$drop_kms" == "yes" ]]; then
+  if [[ "${CONFIG[gpu_driver]}" == "nvidia" ]]; then
     run_cmd "nouveau のブラックリスト設定" bash -c "
       mkdir -p /mnt/etc/modprobe.d
       echo 'blacklist nouveau' > /mnt/etc/modprobe.d/nvidia-blacklist-nouveau.conf
@@ -2932,6 +2957,18 @@ do_pacstrap() {
   # また X / Wayland が起動しない障害時に TTY だけが復旧手段になるため、
   # デスクトップの有無に関わらず全インストールで入れておく。
   pkgs+=(terminus-font)
+
+  # 定期メンテナンス用（全インストール共通。有効化は do_chroot_config）
+  #   pacman-contrib : paccache.timer でパッケージキャッシュを週1回掃除する
+  #   reflector      : reflector.timer でミラーを週1回選び直す
+  # 【理由】どちらも無いと、キャッシュは数GB単位で溜まり続け、
+  # ミラーはインストール時に選んだまま古くなっていく。
+  pkgs+=(pacman-contrib reflector)
+
+  # ファームウェア更新（BIOS・SSD など）。仮想マシンでは更新対象が無いので入れない。
+  if [[ "${CONFIG[virt_env]:-none}" == "none" ]]; then
+    pkgs+=(fwupd)
+  fi
 
   # starship プロンプト（全インストール共通）。
   # 【重要】do_desktop 側ではなくここで入れること。
@@ -3460,6 +3497,59 @@ EOF"
 
   if [[ "${CONFIG[extra_fstrim]:-no}" == "yes" ]]; then
     run_cmd "fstrim.timer 有効化（SSD 定期 TRIM）" systemctl --root=/mnt enable fstrim.timer
+  fi
+
+  # ── 定期メンテナンス ──
+  # パッケージキャッシュの掃除（各パッケージの直近3版を残す。paccache の既定）
+  run_cmd "paccache.timer 有効化（キャッシュの定期掃除）" systemctl --root=/mnt enable paccache.timer
+
+  # ミラーの定期更新。インストール時と同じ条件（日本・HTTPS・24時間以内・速度順8件）。
+  # reflector.conf はパッケージの backup 対象なので、更新時に上書きされない。
+  run_cmd "reflector 設定（日本・速度順）" bash -c "
+    mkdir -p /mnt/etc/xdg/reflector
+    cat > /mnt/etc/xdg/reflector/reflector.conf << 'EOF'
+# Esca Linux: ミラーの定期更新の条件（インストール時と同じ）
+--save /etc/pacman.d/mirrorlist
+--country Japan
+--protocol https
+--age 24
+--sort rate
+--number 8
+EOF
+  "
+  # 【重要】reflector をそのまま定期実行させないこと。条件に合うミラーが
+  # 一時的に0件だったり状況 API が不調だったりすると、空のミラーリストで
+  # 上書きされ、pacman が何もダウンロードできなくなる（利用者が気付きにくい）。
+  # 一時ファイルに書かせ、Server 行があるときだけ差し替えるラッパーを挟む。
+  run_cmd "reflector の安全な定期実行を設定" bash -c "
+    mkdir -p /mnt/usr/local/bin /mnt/etc/systemd/system/reflector.service.d
+    cat > /mnt/usr/local/bin/esca-reflector << 'EOF'
+#!/bin/sh
+# Esca Linux: reflector の結果が空のときは既存のミラーリストを維持する
+ml=/etc/pacman.d/mirrorlist
+tmp=\$(mktemp) || exit 1
+if /usr/bin/reflector @/etc/xdg/reflector/reflector.conf --save \"\$tmp\" \
+   && grep -q '^Server' \"\$tmp\"; then
+  cat \"\$tmp\" > \"\$ml\"
+else
+  echo 'reflector の結果が空か失敗したため、既存のミラーリストを維持します' >&2
+fi
+rm -f \"\$tmp\"
+exit 0
+EOF
+    chmod 755 /mnt/usr/local/bin/esca-reflector
+    cat > /mnt/etc/systemd/system/reflector.service.d/10-esca.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/esca-reflector
+EOF
+  "
+  run_cmd "reflector.timer 有効化（ミラーの定期更新）" systemctl --root=/mnt enable reflector.timer
+
+  # ファームウェア情報の定期取得（更新の適用は利用者が fwupdmgr update やソフトウェアセンターで行う）
+  if [[ "${CONFIG[virt_env]:-none}" == "none" ]]; then
+    run_cmd "fwupd-refresh.timer 有効化（ファームウェア情報の更新）" \
+      systemctl --root=/mnt enable fwupd-refresh.timer
   fi
 
   if [[ "${CONFIG[extra_ufw]}" == "yes" ]]; then
@@ -7747,4 +7837,8 @@ main() {
   run_install
 }
 
-main "$@"
+# テストから関数だけを読み込めるよう、直接実行されたときだけ main を呼ぶ
+# （source install.sh では何も実行されない）
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
