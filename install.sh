@@ -331,6 +331,14 @@ _git_dotfiles() {
 #   2. GitHub から直接ダウンロード（1 が無い＝引き継ぎ「なし」を選んだ場合など）
 WALLPAPER_DEST="/usr/share/backgrounds/esca/esca.png"
 
+# niri の config.kdl に「壁紙を表示する行」が既にあるかを判定する ERE。
+# 【重要】swaybg の行だけでなく、dotfiles の wallpaper_restore.sh を呼ぶ行も含めること。
+# esca-dotfiles の config.kdl は、選んだ壁紙を再ログイン後も保つために
+#   spawn-at-startup "sh" "-c" "bash $HOME/.config/waybar/scripts/wallpaper_restore.sh"
+# で壁紙を起動している。ここで swaybg の行だけを探すと固定画像の swaybg が
+# 追記され、ログインのたびに swaybg が二つ起動して、選んだ壁紙が既定に戻る。
+NIRI_WALLPAPER_SPAWN_RE='^[[:space:]]*spawn-at-startup[[:space:]]+("swaybg"|.*wallpaper_restore)'
+
 # GitHub から取得したバイナリを /tmp にキャッシュしつつ、そのパスを返す
 # （取得できなければ空文字）。
 #
@@ -6303,19 +6311,21 @@ EOF
         'spawn-at-startup "swayidle" "-w" "timeout" "1800" "swaylock -f" "timeout" "3600" "systemctl suspend" "before-sleep" "swaylock -f"'
 
       # ── 壁紙（swaybg）──
-      # 【重要】niri のデフォルト設定にも、引き継ぎ元の dotfiles にも
-      # swaybg の spawn-at-startup は入っていない。パッケージを入れるだけでは
-      # 壁紙は一切表示されず、真っ黒な画面になるため、ここで明示的に起動する。
+      # 【重要】niri のデフォルト設定には swaybg の spawn-at-startup は入っていない。
+      # パッケージを入れるだけでは壁紙は一切表示されず、真っ黒な画面になるため、
+      # ここで明示的に起動する。ただし esca-dotfiles の config.kdl のように
+      # wallpaper_restore.sh で壁紙を起動している場合は追記しない
+      # （判定パターンは NIRI_WALLPAPER_SPAWN_RE の説明を参照）。
       # -m fill: 画面比率に合わせて切り取りつつ全体を埋める（余白を出さない）
       local niri_wall
       niri_wall=$(_install_wallpaper)
       if [[ -n "$niri_wall" ]]; then
-        _conf_append_once "$niri_cfg" '^[[:space:]]*spawn-at-startup[[:space:]]+"swaybg"' \
+        _conf_append_once "$niri_cfg" "$NIRI_WALLPAPER_SPAWN_RE" \
           "spawn-at-startup \"swaybg\" \"-i\" \"${niri_wall}\" \"-m\" \"fill\""
         print_ok "壁紙: ${niri_wall} を swaybg で表示します"
       else
         # 画像が用意できなくても背景が黒一色のままにはしない（テーマ色で塗る）
-        _conf_append_once "$niri_cfg" '^[[:space:]]*spawn-at-startup[[:space:]]+"swaybg"' \
+        _conf_append_once "$niri_cfg" "$NIRI_WALLPAPER_SPAWN_RE" \
           'spawn-at-startup "swaybg" "-c" "#0d182c"'
         print_warn "壁紙画像を取得できなかったため、背景をテーマ色（#0d182c）で塗ります"
       fi
