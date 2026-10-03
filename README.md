@@ -85,8 +85,8 @@ sudo bash install.sh --dry-run
 
 | 構成 | 内容 |
 |---|---|
-| 自動（推奨） | EFI 512M + `/`（swap なし・zram を推奨） |
-| 自動 + swap | EFI 512M + swap + `/`。swap は RAM と同容量を確保し、ハイバネートに対応します |
+| 自動（推奨） | EFI 1G + `/`（swap なし・zram を推奨） |
+| 自動 + swap | EFI 1G + swap + `/`。swap は RAM と同容量を確保し、ハイバネートに対応します |
 | 手動 | `fdisk` を起動。既存の Windows を残したい場合はこちら |
 
 ファイルシステムは **ext4 / btrfs / xfs** から選べます。btrfs を選ぶと `@`（`/`）、`@home`、`@log`（`/var/log`）、`@cache`（`/var/cache`）のサブボリュームを作成し、`compress=zstd,noatime,space_cache=v2` でマウントします。
