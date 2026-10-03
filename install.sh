@@ -606,8 +606,37 @@ _cleanup_temp_sudoers() {
   fi
 }
 
+# 実行中の長時間コマンド（_exec_timed がバックグラウンドで起動したもの）の PID。
+_RUN_PID=""
+
+# 指定 PID とその子孫プロセスをすべて止める（子 → 親の順）。
+_kill_tree() {
+  local p="$1" c
+  for c in $(pgrep -P "$p" 2>/dev/null); do
+    _kill_tree "$c"
+  done
+  kill -TERM "$p" 2>/dev/null || true
+}
+
+# 【重要】Ctrl+C で実行中のコマンドを必ず止めること。
+# 非対話の bash では、& で起動したコマンドは SIGINT を無視する（bash の仕様）。
+# _exec_timed は pacstrap などを & で動かしているため、何もしないと
+# スクリプトだけ終了して、pacstrap は裏で /mnt に書き込み続ける。
 _on_interrupt() {
+  trap '' INT
+  echo ""
+  if [[ -n "${_RUN_PID:-}" ]] && kill -0 "$_RUN_PID" 2>/dev/null; then
+    echo -e "  ${YELLOW}⚠${RESET} 実行中の処理を停止しています..."
+    _kill_tree "$_RUN_PID"
+    local i
+    for i in {1..50}; do
+      kill -0 "$_RUN_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$_RUN_PID" 2>/dev/null && kill -KILL "$_RUN_PID" 2>/dev/null
+  fi
   _cleanup_temp_sudoers
+  echo -e "  ${YELLOW}⚠${RESET} 中断しました。/mnt がマウントされたままの場合は umount -R /mnt を実行してください。"
   exit 130
 }
 
@@ -758,6 +787,8 @@ _exec_timed() {
   local start_ts=$SECONDS pid rc=0 elapsed
   "$@" >> "${CONFIG[log_file]}" 2>&1 < /dev/null &
   pid=$!
+  # Ctrl+C 時に _on_interrupt が止められるよう控えておく（下の _on_interrupt 参照）
+  _RUN_PID="$pid"
   # 【重要】ポーリング間隔を 1 秒固定にしないこと。
   # run_cmd 系の呼び出しは 170 回以上あり、その大半は 1 秒未満で終わる。
   # 固定 1 秒だと 1 回あたり平均 0.5 秒の取りこぼしが出て、合計で
@@ -776,6 +807,7 @@ _exec_timed() {
   # 「|| rc=$?」で元の終了コードを取得する（set -e 下でも安全）
   rc=0
   wait "$pid" 2>/dev/null || rc=$?
+  _RUN_PID=""
   return "$rc"
 }
 
@@ -962,6 +994,31 @@ _set_password() {
   fi
 }
 
+# ユーザー名がシステムのユーザー名・グループ名と衝突するかを判定する（衝突=0）。
+# useradd -m は同名のグループも作るため、既存グループ名（wheel 等）とも衝突する。
+# Live 環境の /etc/passwd・/etc/group に加え、インストール先で後から作られる
+# 代表的なシステムユーザー（DM・各種サービス）も固定リストで弾く。
+_is_reserved_username() {
+  local name="$1" r
+  local reserved=(
+    root bin daemon mail ftp http nobody dbus polkitd avahi colord cups rtkit
+    sddm gdm lightdm greeter git uuidd usbmux geoclue flatpak tss alpm
+    nm-openconnect nm-openvpn brltty saned
+    wheel audio video storage optical input users lp kvm render sys adm log
+    tty disk utmp uucp network power scanner rfkill games locate proc
+  )
+  for r in "${reserved[@]}"; do
+    [[ "$name" == "$r" ]] && return 0
+  done
+  [[ "$name" == systemd-* ]] && return 0
+  # 【重要】UID/GID 1000 未満（システム用）だけを見ること。ホストPCから実行した
+  # 場合、/etc/passwd には利用者自身もいるため、全件を見ると
+  # 「今と同じユーザー名で作り直す」ことができなくなる。
+  awk -F: '$3 < 1000 {print $1}' /etc/passwd /etc/group 2>/dev/null \
+    | grep -qxF -- "$name" && return 0
+  return 1
+}
+
 parse_users_line() {
   local entry="$1"
   uname=$(cut -d'|' -f1  <<< "$entry")
@@ -1007,6 +1064,22 @@ step_disk() {
     fi
   fi
 
+  # 起動中のシステムが載っているディスクを特定して除外する。
+  # 【重要】今使っている Arch から実行した場合（設定の引き継ぎ「ホストPC」で
+  # 想定している使い方）、/ や /home のあるディスクがそのまま候補に並び、
+  # 選ぶと do_partition が umount -f してから全消去してしまう。
+  # Live ISO では / が airootfs（ブロックデバイスではない）なので何も除外されない。
+  # btrfs の "/dev/sda2[/@]" や LUKS / LVM を経由していても、
+  # lsblk -s（逆依存）で親を辿れば物理ディスクに行き着く。
+  local sys_disks=() _t _src _d
+  for _t in / /boot /efi /boot/efi /home /usr /var; do
+    _src=$(findmnt -n -o SOURCE "$_t" 2>/dev/null | head -n1 | sed 's/\[.*\]$//' || true)
+    [[ "$_src" == /dev/* ]] || continue
+    while IFS= read -r _d; do
+      [[ -n "$_d" && " ${sys_disks[*]} " != *" ${_d} "* ]] && sys_disks+=("$_d")
+    done < <(lsblk -rnso NAME,TYPE "$_src" 2>/dev/null | awk '$2=="disk"{print $1}')
+  done
+
   # ディスク一覧を構築（sysfs から直接読み取り、loop・光学・ISO デバイスを除外）
   local disks=()
   for devpath in /sys/block/*; do
@@ -1025,6 +1098,9 @@ step_disk() {
 
     # ISO デバイスをスキップ
     [[ -n "$iso_dev" && "$devname" == "$iso_dev" ]] && continue
+
+    # 起動中のシステムのディスクをスキップ
+    [[ " ${sys_disks[*]} " == *" ${devname} "* ]] && continue
 
     # サイズを人間が読みやすい形式に変換
     local bytes
@@ -1077,6 +1153,9 @@ step_disk() {
   # ISO デバイスを除外した旨を表示
   if [[ -n "$iso_dev" ]]; then
     print_ok "Arch ISO デバイス (/dev/${iso_dev}) を候補から除外しました"
+  fi
+  if [[ "${#sys_disks[@]}" -gt 0 ]]; then
+    print_ok "起動中のシステムのディスク (${sys_disks[*]}) を候補から除外しました"
   fi
 
   echo ""
@@ -1249,20 +1328,44 @@ step_system() {
   echo ""
 
   # GPU を自動検出して推奨を提示
+  #
+  # 【重要】lspci の全行に対して "ATI" などで grep してはいけない。
+  # 「VGA comp-ati-ble controller」「Communic-ati-on controller」のように
+  # 普通の単語に含まれるため、NVIDIA 以外の全マシン（Intel 機も仮想マシンも）が
+  # AMD と誤判定されていた。mesa が入るので画面は映り、気付きにくい。
+  # 判定は「表示デバイス（PCI クラス 03xx）の行」だけに絞り、単語境界で照合する。
+  #
+  # 【重要】仮想環境を最初に判定すること。仮想 GPU の行にもホスト側の
+  # ベンダー名が出ることがあり、実機用ドライバーを入れてしまう。
   local detected_gpu=""
   local recommended=""
-  if lspci 2>/dev/null | grep -qi "NVIDIA"; then
+  local gpu_lines virt_kind
+  gpu_lines=$(lspci -nn 2>/dev/null | grep -E '\[03[0-9a-f]{2}\]:' || true)
+  virt_kind=$(systemd-detect-virt 2>/dev/null || true)
+  if [[ "$virt_kind" =~ ^(oracle|kvm|vmware|qemu)$ ]]; then
+    detected_gpu="仮想環境 (${virt_kind})"
+    recommended="virtual"
+  elif grep -qi 'NVIDIA' <<< "$gpu_lines"; then
     detected_gpu="NVIDIA"
     recommended="nvidia"
-  elif lspci 2>/dev/null | grep -qi "AMD\|ATI\|Radeon"; then
+    # 【重要】Arch の nvidia（現 nvidia-open）は Turing（GTX 16 / RTX 20）以降専用。
+    # 2025年12月の 590 系で Pascal（GTX 10）以前のサポートが外れた。
+    # 古い世代に入れると起動後に画面が出ないため nouveau に切り替える。
+    # 判定は PCI デバイス ID で行う（Turing 以降は 0x1e00 以上）。
+    local nv_id
+    nv_id=$(grep -oiE '\[10de:[0-9a-f]{4}\]' <<< "$gpu_lines" | head -n1 | cut -c7-10)
+    if [[ -n "$nv_id" ]] && (( 16#$nv_id < 16#1e00 )); then
+      detected_gpu="NVIDIA（Pascal 以前の世代）"
+      recommended="nouveau"
+      print_warn "この NVIDIA GPU は現在の公式ドライバーの対象外のため、nouveau を使います。"
+      print_warn "プロプライエタリ版が必要な場合は、インストール後に AUR の nvidia-580xx-dkms を導入してください。"
+    fi
+  elif grep -qiE 'Advanced Micro Devices|\bAMD\b|\bATI\b|Radeon' <<< "$gpu_lines"; then
     detected_gpu="AMD"
     recommended="amdgpu"
-  elif lspci 2>/dev/null | grep -qi "Intel.*Graphics\|Intel.*VGA"; then
+  elif grep -qi 'Intel' <<< "$gpu_lines"; then
     detected_gpu="Intel"
     recommended="intel"
-  elif systemd-detect-virt 2>/dev/null | grep -qiE "oracle|kvm|vmware|qemu"; then
-    detected_gpu="仮想環境"
-    recommended="virtual"
   fi
 
   if [[ -n "$detected_gpu" ]]; then
@@ -1283,16 +1386,16 @@ step_system() {
 
   local gpu
   gpu=$(select_from_list "GPU ドライバーを選択してください:" \
-    "NVIDIA    - NVIDIA 製 GPU（GeForce など）※ゲーミング PC に多い" \
-    "NVIDIA    - NVIDIA 製 GPU（オープンソース版 Nouveau）" \
+    "NVIDIA    - NVIDIA 製 GPU（GTX 16 / RTX 以降）※ゲーミング PC に多い" \
+    "NVIDIA    - NVIDIA 製 GPU（Nouveau・GTX 10 以前はこちら）" \
     "AMD       - AMD 製 GPU（Radeon など）" \
     "Intel     - Intel 内蔵グラフィックス（CPU 内蔵グラフィック）" \
     "仮想環境  - VirtualBox・VMware 上で動かしている場合" \
     "インストールしない - よく分からない場合・後で手動設定")
 
   case "$gpu" in
-    "NVIDIA    - NVIDIA 製 GPU（GeForce など）※ゲーミング PC に多い") CONFIG[gpu_driver]="nvidia" ;;
-    "NVIDIA    - NVIDIA 製 GPU（オープンソース版 Nouveau）")            CONFIG[gpu_driver]="nouveau" ;;
+    "NVIDIA    - NVIDIA 製 GPU（GTX 16 / RTX 以降）※ゲーミング PC に多い") CONFIG[gpu_driver]="nvidia" ;;
+    "NVIDIA    - NVIDIA 製 GPU（Nouveau・GTX 10 以前はこちら）")         CONFIG[gpu_driver]="nouveau" ;;
     "AMD       - AMD 製 GPU（Radeon など）")                            CONFIG[gpu_driver]="amdgpu" ;;
     "Intel     - Intel 内蔵グラフィックス（CPU 内蔵グラフィック）")     CONFIG[gpu_driver]="intel" ;;
     "仮想環境  - VirtualBox・VMware 上で動かしている場合")              CONFIG[gpu_driver]="virtual" ;;
@@ -1344,6 +1447,15 @@ step_users() {
       fi
       if [[ ! "$uname" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
         print_err "小文字英数字・アンダースコア・ハイフンのみ使用できます（先頭は英字）。"
+        continue
+      fi
+      if [[ ${#uname} -gt 32 ]]; then
+        print_err "ユーザー名は32文字以内にしてください。"
+        continue
+      fi
+      # 【重要】ここで弾かないと、useradd がディスク消去後に失敗して止まる。
+      if _is_reserved_username "$uname"; then
+        print_err "「${uname}」はシステムが使う名前のため使用できません。別の名前にしてください。"
         continue
       fi
       # 重複チェック
@@ -1771,6 +1883,38 @@ step_fonts() {
 # ステップ 7: 追加パッケージ
 # ============================================
 
+# スペース区切りのパッケージ名のうち、公式リポジトリに無いものを配列に入れて返す。
+# 使い方: local bad=(); _check_repo_pkgs bad "pkg1 pkg2"
+# パッケージ名だけでなくグループ名（例 gnome）も有効として扱う（pacstrap が受け付けるため）。
+# 同期データベースが無い Live ISO では一度だけ取得する。取得できなければ
+# 確認を諦めて全件を有効扱いにする（確認できないことでインストールを止めない）。
+_check_repo_pkgs() {
+  local -n _bad_ref="$1"
+  local pkg_str="$2" p
+  _bad_ref=()
+  # multilib は Live 環境の pacman.conf で後から有効化しているため、
+  # core.db があっても multilib.db だけ無いことがある（lib32-* が誤って弾かれる）。
+  local sync_dir="/var/lib/pacman/sync" need_sync="no"
+  [[ -f "${sync_dir}/core.db" ]] || need_sync="yes"
+  if grep -q '^\[multilib\]' /etc/pacman.conf 2>/dev/null && [[ ! -f "${sync_dir}/multilib.db" ]]; then
+    need_sync="yes"
+  fi
+  if [[ "$need_sync" == "yes" ]]; then
+    if [[ "${CONFIG[dry_run]}" == "yes" ]] \
+       || ! pacman -Sy --noconfirm >> "${CONFIG[log_file]}" 2>&1; then
+      print_warn "パッケージ情報を取得できないため、名前の確認を省略します。"
+      return 0
+    fi
+  fi
+  local pkgs=()
+  read -ra pkgs <<< "$pkg_str"
+  for p in "${pkgs[@]}"; do
+    pacman -Si -- "$p" > /dev/null 2>&1 && continue
+    pacman -Sg -- "$p" > /dev/null 2>&1 && continue
+    _bad_ref+=("$p")
+  done
+}
+
 step_extra_packages() {
   print_step "追加パッケージ・サービス"
 
@@ -1847,8 +1991,18 @@ step_extra_packages() {
   fi
 
   # その他の追加パッケージ
+  # 【重要】ここで存在を確認すること。打ち間違いや AUR のパッケージ名が
+  # 混ざっていると、ディスク消去後の pacstrap が「target not found」で止まる。
   local extra
-  extra=$(ask "その他の追加パッケージ（スペース区切り、不要なら空 Enter）" "")
+  while true; do
+    extra=$(ask "その他の追加パッケージ（スペース区切り、不要なら空 Enter）" "")
+    [[ -z "$extra" ]] && break
+    local bad=()
+    _check_repo_pkgs bad "$extra"
+    [[ "${#bad[@]}" -eq 0 ]] && break
+    print_err "公式リポジトリに見つかりません: ${bad[*]}"
+    print_warn "AUR のパッケージはここでは指定できません（インストール後に yay で導入してください）。"
+  done
   CONFIG[extra_pkgs]="$extra"
   # 【重要】ここを `[[ -n "$extra" ]] && print_ok ...` と書いてはいけない。
   # 関数の最後の文になるため、$extra が空（＝Enter だけ押した通常の操作）だと
@@ -2001,12 +2155,21 @@ do_partition() {
   fi
 
   # 対象ディスクのパーティションが既にマウントされていれば全てアンマウント
-  run_cmd "既存マウントの解除" bash -c "
-    for mp in \$(lsblk -lno MOUNTPOINT '${disk}' 2>/dev/null | grep -v '^$' | sort -r); do
-      umount -f \"\$mp\" 2>/dev/null || true
+  # 【重要】swapoff -a を使わないこと。対象と無関係な swap（ホストPCから
+  # 実行している場合のホスト側 swap など）まで止めてしまう。
+  # 対象ディスク上の swap だけを止める。また lsblk の MOUNTPOINT には
+  # swap が "[SWAP]" と出るため、umount の対象からは外す。
+  run_cmd "既存マウントの解除" bash -c '
+    disk="$1"
+    lsblk -lnpo NAME,MOUNTPOINT "$disk" 2>/dev/null | while read -r name mp; do
+      if [ "$mp" = "[SWAP]" ]; then swapoff "$name" 2>/dev/null || true; fi
     done
-    swapoff -a 2>/dev/null || true
-  "
+    lsblk -lno MOUNTPOINT "$disk" 2>/dev/null | grep -v -e "^$" -e "^\[SWAP\]$" | sort -r \
+      | while IFS= read -r mp; do
+          umount -f "$mp" 2>/dev/null || true
+        done
+    true
+  ' _ "$disk"
 
   # GPT で全消去（--zap-all は GPT/MBR 双方を破棄し、以降の --new で新規GPTが作られる）
   run_cmd "GPT テーブル初期化" sgdisk --zap-all "$disk"
@@ -2419,22 +2582,58 @@ step_mirror() {
 do_mirrorlist() {
   print_step "ミラーリスト設定"
 
+  if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
+    print_warn "ドライランのためミラーリストの更新をスキップします"
+    return 0
+  fi
+
+  # 【重要】reflector の失敗でインストールを止めないこと。
+  # ミラー状況 API の不調や「条件に合うミラーが0件」は普通に起こるが、
+  # Live ISO には起動時に作られた動作するミラーリストが既にある。
+  # 失敗したら・0件なら、そのリストに戻して先へ進む。
+  # （以前はコメントにフォールバックありと書きつつ実装が無く、
+  #   ディスクを消した後にここで終了していた）
+  local ml="/etc/pacman.d/mirrorlist"
+  local backup="/etc/pacman.d/mirrorlist.esca-backup"
+  cp -f "$ml" "$backup" 2>/dev/null || true
+
   # 日本語特化のため reflector（--country Japan）固定
-  # reflector が入っていなければインストール
+  # reflector が入っていなければインストール（失敗しても既存リストで続行）
   if ! command -v reflector &>/dev/null; then
-    run_cmd_retry "reflector インストール" pacman -S --noconfirm reflector
+    run_cmd_soft "reflector インストール" pacman -S --noconfirm reflector || true
   fi
 
   # 日本国内・HTTPS・最終同期24時間以内・速度順 上位8件
-  run_cmd_retry "reflector 実行（Japan・速度順）" \
-    reflector --country "${CONFIG[mirror_country]:-Japan}" \
-      --protocol https \
-      --age 24 \
-      --sort rate \
-      --number 8 \
-      --save /etc/pacman.d/mirrorlist
+  local desc="reflector 実行（Japan・速度順）" ok="no"
+  if command -v reflector &>/dev/null; then
+    echo -ne "  ${CYAN}…${RESET} ${desc}..."
+    if _exec_timed "$desc" reflector --country "${CONFIG[mirror_country]:-Japan}" \
+         --protocol https \
+         --age 24 \
+         --sort rate \
+         --number 8 \
+         --save "$ml" \
+       && grep -q '^Server' "$ml"; then
+      ok="yes"
+      echo -e "\r  ${GREEN}✔${RESET} ${desc}                              "
+    else
+      echo -e "\r  ${YELLOW}⚠${RESET} ${desc} — 失敗または該当ミラー0件                    "
+    fi
+  fi
+
+  if [[ "$ok" != "yes" ]]; then
+    if grep -q '^Server' "$backup" 2>/dev/null; then
+      cp -f "$backup" "$ml"
+      print_warn "既存のミラーリストで続行します（インストール後に reflector で選び直せます）"
+    else
+      print_err "使えるミラーリストがありません。ネットワークを確認してください。"
+      print_err "ログ: ${CONFIG[log_file]}"
+      exit 1
+    fi
+  fi
+
   print_ok "選択されたミラー:"
-  grep '^Server' /etc/pacman.d/mirrorlist | sed 's/^/    /' || true
+  grep '^Server' "$ml" | head -n 8 | sed 's/^/    /' || true
 }
 
 # ============================================
@@ -2580,7 +2779,11 @@ do_pacstrap() {
 
   # GPU ドライバーの追加
   case "${CONFIG[gpu_driver]}" in
-    nvidia)  pkgs+=(nvidia nvidia-utils) ;;
+    # 【重要】パッケージ名は nvidia-open。2025年12月に Arch が nvidia を置き換え、
+    # nvidia-open は "nvidia" を provides しないため、旧名のままだと
+    # pacstrap が「target not found」で止まる（ディスク消去後に）。
+    # カーネルモジュール名（nvidia / nvidia_drm など）は従来と同じ。
+    nvidia)  pkgs+=(nvidia-open nvidia-utils) ;;
     nouveau) pkgs+=(xf86-video-nouveau mesa) ;;
     amdgpu)  pkgs+=(xf86-video-amdgpu mesa vulkan-radeon) ;;
     intel)
@@ -3722,9 +3925,14 @@ EOF"
 write_libreoffice_cosmic_launchers() {
   [[ "${CONFIG[dry_run]}" == "yes" ]] && return 0
   [[ "${CONFIG[install_office]:-no}" == "yes" ]] || return 0
-  run_cmd "COSMIC: LibreOffice ランチャーを XWayland 経由に上書き" bash -c '
+  # 【重要】書き込み先は引数 $1 で渡すこと。シングルクォートの中に
+  # ${SKEL_ROOT} を書くと、子の bash には SKEL_ROOT が無いので空文字になり、
+  # Live 環境の /.local/share/applications に書いて「成功」していた。
+  # 【重要】run_cmd ではなく run_cmd_soft を使う。run_cmd は失敗時に exit するため、
+  # 後ろの「|| print_warn」に到達せずインストール全体が止まる。
+  run_cmd_soft "COSMIC: LibreOffice ランチャーを XWayland 経由に上書き" bash -c '
     shopt -s nullglob
-    dst=${SKEL_ROOT}/.local/share/applications
+    dst="$1"
     mkdir -p "$dst"
     found=0
     for f in /mnt/usr/share/applications/libreoffice-*.desktop; do
@@ -3733,7 +3941,8 @@ write_libreoffice_cosmic_launchers() {
       found=1
     done
     [ "$found" -eq 1 ]
-  ' || print_warn "LibreOffice の .desktop が見つからず、ランチャー上書きをスキップしました"
+  ' _ "${SKEL_ROOT}/.local/share/applications" \
+    || print_warn "LibreOffice の .desktop が見つからず、ランチャー上書きをスキップしました"
 }
 
 # xdg-user-dir PICTURES で「実際のピクチャディレクトリ（日本語名）」を解決し、
@@ -7012,9 +7221,12 @@ run_install() {
   CURRENT_STEP_NAME=""
   CURRENT_STEP_TS=0
 
+  # 【重要】ミラー選定はディスクに触る前に行う。
+  # ネットワーク起因で止まる可能性がある処理を先に済ませておけば、
+  # 失敗してもディスクは無傷のまま中断できる。
+  do_mirrorlist
   do_partition
   do_format_and_mount
-  do_mirrorlist
   do_pacstrap
   do_fstab
   do_chroot_config
