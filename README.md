@@ -135,7 +135,8 @@ Arch Linux 上で実行してください（`archiso` が無ければ自動で�
 | 必要な空き容量 | 10GB 以上（`/var/tmp` を使用） |
 | 作業ディレクトリ | `/var/tmp/archiso-work` |
 | 出力先 | `./out/` |
-| ISO ラベル | `MYARCHINSTALL` |
+| ISO ラベル | `ESCA_LINUX` |
+| 圧縮方式 | zstd（ビルド・起動が速い） |
 
 作られる ISO には次の調整が入ります。
 
@@ -150,7 +151,7 @@ Arch Linux 上で実行してください（`archiso` が無ければ自動で�
 USB メモリへの書き込み例です。**書き込み先のデバイス名は必ず `lsblk` で確認してください。**
 
 ```bash
-sudo dd if=out/myarchinstall-*.iso of=/dev/sdX bs=4M status=progress oflag=sync
+sudo dd if=out/esca-linux-*.iso of=/dev/sdX bs=4M status=progress oflag=sync
 ```
 
 ---

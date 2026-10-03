@@ -101,7 +101,7 @@ setup_profile() {
   cat > "${PROFILE_DIR}/airootfs/etc/motd" << 'MOTD'
 
   ╔══════════════════════════════════════════╗
-  ║     myarchinstall - Arch インストーラー  ║
+  ║   Esca Linux - 日本語インストーラー     ║
   ╚══════════════════════════════════════════╝
 
   インストールを開始するには:
@@ -160,7 +160,7 @@ EOF
   # ============================================
   cat >> "${PROFILE_DIR}/airootfs/root/.bashrc" << 'BASHRC'
 
-# myarchinstall 案内
+# Esca Linux インストーラーの案内
 if [[ -f /root/install.sh ]]; then
   echo ""
   echo -e "\033[1;33m  ▶ インストーラーを起動するには:\033[0m bash /root/install.sh"
@@ -172,12 +172,31 @@ BASHRC
   # ============================================
   # ISO のラベルをカスタマイズ
   # ============================================
-  sed -i "s/^iso_label=.*/iso_label=\"MYARCHINSTALL\"/" \
+  # iso_label はボリュームラベル（最大32文字・英大文字推奨）、
+  # iso_name は出力ファイル名の先頭（esca-linux-YYYY.MM.DD-x86_64.iso）になる。
+  sed -i "s/^iso_label=.*/iso_label=\"ESCA_LINUX\"/" \
     "${PROFILE_DIR}/profiledef.sh"
-  sed -i "s/^iso_name=.*/iso_name=\"myarchinstall\"/" \
+  sed -i "s/^iso_name=.*/iso_name=\"esca-linux\"/" \
+    "${PROFILE_DIR}/profiledef.sh"
+  sed -i "s/^iso_application=.*/iso_application=\"Esca Linux Live\/Install medium\"/" \
     "${PROFILE_DIR}/profiledef.sh"
 
-  print_ok "ISO ラベル: MYARCHINSTALL"
+  print_ok "ISO ラベル: ESCA_LINUX（ファイル名: esca-linux-*.iso）"
+
+  # ============================================
+  # airootfs の圧縮を xz から zstd に変更する
+  # ============================================
+  # 【理由】xz は圧縮率が最も高い代わりに、ビルドが遅く、起動時の展開も遅い。
+  # zstd は ISO が少し大きくなる程度で、ビルドも Live 環境の起動・
+  # ファイル読み込みも速くなる。
+  # 公式プロファイルの行を丸ごと差し替えるので、上流の既定値が変わっても追従しない点に注意。
+  if grep -q '^airootfs_image_tool_options=' "${PROFILE_DIR}/profiledef.sh"; then
+    sed -i "s/^airootfs_image_tool_options=.*/airootfs_image_tool_options=('-comp' 'zstd' '-Xcompression-level' '15' '-b' '1M')/" \
+      "${PROFILE_DIR}/profiledef.sh"
+    print_ok "airootfs の圧縮: zstd（ビルドと起動を高速化）"
+  else
+    print_warn "profiledef.sh に圧縮設定が見つからないため、既定の圧縮のままにします"
+  fi
 
   # ============================================
   # packages.x86_64 の調整
@@ -282,7 +301,7 @@ cleanup() {
 main() {
   echo -e "${CYAN}${BOLD}"
   echo "╔══════════════════════════════════════════╗"
-  echo "║   myarchinstall ISO ビルダー             ║"
+  echo "║   Esca Linux ISO ビルダー                ║"
   echo "╚══════════════════════════════════════════╝"
   echo -e "${RESET}"
 

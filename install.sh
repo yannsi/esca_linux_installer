@@ -1338,7 +1338,7 @@ step_system() {
   # 未検証のまま bash -c に埋め込むと ' などでコマンドが壊れるため必ず検証する。
   echo ""
   while true; do
-    CONFIG[hostname]=$(ask "ホスト名" "archlinux")
+    CONFIG[hostname]=$(ask "ホスト名" "esca")
     if [[ -z "${CONFIG[hostname]}" ]]; then
       print_err "ホスト名は必須です。"
       continue
@@ -2783,6 +2783,73 @@ do_mirrorlist() {
 }
 
 # ============================================
+# initramfs の設定（pacstrap より前に書く）
+# ============================================
+# 【方針】mkinitcpio.conf を pacstrap 後に sed で書き換えると、linux の導入時に
+# 作られた initramfs が古い設定のままになり、もう一度 mkinitcpio -P が必要になる。
+# 設定を先に置いておけば、pacstrap 中の1回の生成で済む（インストール時間の短縮）。
+#
+# mkinitcpio.conf 本体はパッケージ所有なので触らず、/etc/mkinitcpio.conf.d/ の
+# ドロップインに書く。ドロップインは本体の後ろに連結して bash として読まれるため、
+# 既定の HOOKS を前提にせず配列操作で調整できる（既定 HOOKS が変わっても追従する）。
+#
+# /etc/vconsole.conf もここで書く。keymap / sd-vconsole フックが initramfs に
+# キーマップとフォントを取り込むため、pacstrap 後に書くと反映されない。
+# （systemd が持つのは /usr/share/factory/etc/vconsole.conf で、/etc 側は
+#   どのパッケージも所有しないため、先に置いても pacstrap と衝突しない）
+write_initramfs_config() {
+  local dropin="/etc/mkinitcpio.conf.d/10-esca.conf"
+  local body="# Esca Linux インストーラーが生成（mkinitcpio.conf の後に読み込まれる）"$'\n'
+
+  # btrfs ルート
+  if [[ "${CONFIG[fs_type]}" == "btrfs" ]]; then
+    body+="MODULES+=(btrfs)"$'\n'
+  fi
+
+  # NVIDIA: 早期 KMS 用にモジュールを入れ、kms フック（nouveau を同梱する）は外す
+  local drop_kms="no" add_resume="no"
+  if [[ "${CONFIG[gpu_driver]}" == "nvidia" ]]; then
+    body+="MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)"$'\n'
+    drop_kms="yes"
+  fi
+
+  # ハイバネート: swap があるときだけ resume フックを filesystems の前に入れる。
+  # 判定は partition_scheme ではなく「実際に swap があるか」で行う
+  # （do_bootloader は swap があれば resume= を渡すため、ここと揃える）。
+  # 【重要】systemd ベースの initramfs（HOOKS に systemd）では resume フックは不要。
+  # systemd 自身がカーネルの resume= を見て復帰を処理するため、追加しない。
+  [[ -n "${CONFIG[swap_part]}" ]] && add_resume="yes"
+
+  if [[ "$drop_kms" == "yes" || "$add_resume" == "yes" ]]; then
+    body+='_esca_hooks=()'$'\n'
+    body+='for _esca_h in "${HOOKS[@]}"; do'$'\n'
+    [[ "$drop_kms" == "yes" ]] && body+='  [[ "$_esca_h" == kms ]] && continue'$'\n'
+    [[ "$add_resume" == "yes" ]] && body+='  if [[ "$_esca_h" == filesystems && " ${HOOKS[*]} " != *" systemd "* && " ${HOOKS[*]} " != *" resume "* ]]; then _esca_hooks+=(resume); fi'$'\n'
+    body+='  _esca_hooks+=("$_esca_h")'$'\n'
+    body+='done'$'\n'
+    body+='HOOKS=("${_esca_hooks[@]}")'$'\n'
+    body+='unset _esca_hooks _esca_h'$'\n'
+  fi
+
+  run_cmd "キーマップ・コンソールフォント設定 (vconsole.conf)" \
+    bash -c "mkdir -p /mnt/etc && printf 'KEYMAP=%s\nFONT=ter-116n\n' '${CONFIG[keymap]}' > /mnt/etc/vconsole.conf"
+
+  # 追加する設定が無ければドロップインは置かない
+  if [[ "$body" == *$'\n'?* ]]; then
+    run_cmd "initramfs 設定 (mkinitcpio.conf.d)" \
+      bash -c 'mkdir -p "$(dirname "$1")" && printf "%s" "$2" > "$1"' _ "/mnt${dropin}" "$body"
+  fi
+
+  # NVIDIA: nouveau をモジュールレベルでも無効化（modconf フックで initramfs にも入る）
+  if [[ "$drop_kms" == "yes" ]]; then
+    run_cmd "nouveau のブラックリスト設定" bash -c "
+      mkdir -p /mnt/etc/modprobe.d
+      echo 'blacklist nouveau' > /mnt/etc/modprobe.d/nvidia-blacklist-nouveau.conf
+    "
+  fi
+}
+
+# ============================================
 # 実行: ベースインストール
 # ============================================
 
@@ -2995,6 +3062,9 @@ do_pacstrap() {
       pkgs+=(ibus ibus-mozc) ;;
   esac
 
+  # initramfs の設定は pacstrap より前に置く（linux 導入時の生成で一度に反映させるため）
+  write_initramfs_config
+
   run_cmd_retry "pacstrap 実行（時間がかかります）" pacstrap /mnt "${pkgs[@]}"
 }
 do_fstab() {
@@ -3129,20 +3199,8 @@ EOF"
     "
   fi
 
-  # 【重要】FONT は KEYMAP と同じ /etc/vconsole.conf に書く。
-  # 以前は KEYMAP 行だけを `>` で書き出していたため、ここで FONT を
-  # 別途追記しようとすると上書きで消える。1回の書き出しにまとめる。
-  #
-  # ter-116n = Terminus 8x16 通常字形。標準フォントと同じ高さのまま
-  # 字形が読みやすくなる無難な既定値。高解像度パネルで小さすぎる場合は
-  # ter-124n / ter-132n（12x24 / 16x32）に変更する。
-  #
-  # 【注意】コンソールフォントは PSF 形式で収録グリフ数に上限があり、
-  # Nerd Font のアイコンや Powerline 区切り記号は表示できない。
-  # TTY で starship の記号が豆腐になる場合はフォントではなくプリセット側で
-  # 対処する（starship preset plain-text-symbols）。
-  run_cmd "キーマップ・コンソールフォント設定" \
-    bash -c "printf 'KEYMAP=%s\nFONT=ter-116n\n' '${CONFIG[keymap]}' > /mnt/etc/vconsole.conf"
+  # キーマップ・コンソールフォント（/etc/vconsole.conf）は initramfs に
+  # 取り込まれるため、pacstrap より前に write_initramfs_config で書いている。
 
   # X11 キーボードレイアウト設定
   # キーマップは jp106 固定のため X11 レイアウトも jp 固定
@@ -3386,54 +3444,8 @@ EOF"
   run_cmd "pacman.conf チューニング（インストール先）" \
     bash -c "$(declare -f tune_pacman_conf); tune_pacman_conf /mnt/etc/pacman.conf"
 
-  # ハイバネート用の resume フック追加
-  # 判定は partition_scheme ではなく「実際に swap があるか」で行う。
-  # do_bootloader は scheme に関わらず swap があれば resume=PARTUUID= を渡すため、
-  # auto_swap 限定にすると手動パーティション+swap でフックだけ欠けて不整合になる。
-  if [[ -n "${CONFIG[swap_part]}" ]]; then
-    run_cmd "mkinitcpio.conf に resume フックを追加" bash -c "
-      if grep -q '^HOOKS=' /mnt/etc/mkinitcpio.conf; then
-        # アドレス指定なしだとコメント内の例示 HOOKS 行まで書き換わるため /^HOOKS=/ に限定
-        sed -i '/^HOOKS=/ s/\bfilesystems\b/resume filesystems/' /mnt/etc/mkinitcpio.conf
-      fi
-    "
-  fi
-
-  # btrfs モジュール追加
-  if [[ "${CONFIG[fs_type]}" == "btrfs" ]]; then
-    run_cmd "mkinitcpio.conf に btrfs モジュールを追加" bash -c "
-      if grep -q '^MODULES=()' /mnt/etc/mkinitcpio.conf; then
-        sed -i 's/^MODULES=()/MODULES=(btrfs)/' /mnt/etc/mkinitcpio.conf
-      elif grep -q '^MODULES=' /mnt/etc/mkinitcpio.conf; then
-        sed -i 's/^MODULES=(\(.*\))/MODULES=(\1 btrfs)/' /mnt/etc/mkinitcpio.conf
-      fi
-    "
-  fi
-
-  # NVIDIA KMS 設定
-  if [[ "${CONFIG[gpu_driver]}" == "nvidia" ]]; then
-    run_cmd "mkinitcpio.conf に NVIDIA モジュールを追加" bash -c "
-      if grep -q '^MODULES=' /mnt/etc/mkinitcpio.conf; then
-        # MODULES=() の場合と MODULES=(既存) の場合を分けて処理
-        if grep -q '^MODULES=()' /mnt/etc/mkinitcpio.conf; then
-          sed -i 's/^MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /mnt/etc/mkinitcpio.conf
-        else
-          sed -i 's/^MODULES=(\(.*\))/MODULES=(\1 nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /mnt/etc/mkinitcpio.conf
-        fi
-      fi
-    "
-    # MODULES に nvidia を入れた場合、HOOKS の kms は外す。
-    # kms が残っていると initramfs に nouveau が同梱され、早期 KMS で
-    # プロプライエタリドライバと競合して黒画面になることがある（Arch Wiki 推奨）。
-    run_cmd "mkinitcpio.conf から kms フックを除去 (NVIDIA)" bash -c "
-      sed -i '/^HOOKS=/ s/\bkms[[:space:]]*//' /mnt/etc/mkinitcpio.conf
-    "
-    # nouveau をモジュールレベルでも無効化（KMS 競合の二重防止）
-    run_cmd "nouveau のブラックリスト設定" bash -c "
-      mkdir -p /mnt/etc/modprobe.d
-      echo 'blacklist nouveau' > /mnt/etc/modprobe.d/nvidia-blacklist-nouveau.conf
-    "
-  fi
+  # resume フック・btrfs / NVIDIA モジュール・nouveau の無効化は、
+  # pacstrap より前に write_initramfs_config でまとめて設定済み。
 
   # 各種サービスの有効化
 
@@ -3612,8 +3624,13 @@ TYPORAEOF
   # OS 名・バナーの書き込み
   write_os_branding
 
-  # initramfs の再生成
-  run_cmd "initramfs 再生成 (mkinitcpio)" arch-chroot /mnt mkinitcpio -P
+  # initramfs は pacstrap の中で（linux の導入時に）設定済みの状態で一度だけ作られる。
+  # 【重要】ここで無条件に mkinitcpio -P を再実行しないこと。以前は設定を
+  # pacstrap 後に書き換えていたため2回作っており、その分インストールが遅かった。
+  # 念のため、何らかの理由でイメージが無いときだけ作る。
+  if [[ "${CONFIG[dry_run]}" != "yes" ]] && ! compgen -G "/mnt/boot/initramfs-*.img" > /dev/null; then
+    run_cmd "initramfs 生成 (mkinitcpio)" arch-chroot /mnt mkinitcpio -P
+  fi
 }
 
 # ============================================
@@ -3760,7 +3777,7 @@ do_bootloader() {
 
     # ローダー設定
     run_cmd "loader.conf 作成" bash -c "cat > /mnt/boot/loader/loader.conf << EOF
-default  arch.conf
+default  esca.conf
 timeout  5
 console-mode max
 editor   no
@@ -3790,20 +3807,26 @@ EOF"
     # エントリファイル作成（ucode が空の場合は空行を入れない）
     local ucode_line=""
     [[ -n "$ucode_initrd" ]] && ucode_line="${ucode_initrd}"$'\n'
-    run_cmd "arch.conf エントリ作成" bash -c "mkdir -p /mnt/boot/loader/entries && cat > /mnt/boot/loader/entries/arch.conf << EOF
-title   Arch Linux
+    # 起動メニューに出る名前。os-release と同じく OS_NAME で一元管理する。
+    run_cmd "起動エントリ作成 (esca.conf)" bash -c "mkdir -p /mnt/boot/loader/entries && cat > /mnt/boot/loader/entries/esca.conf << EOF
+title   ${OS_NAME}
 linux   /vmlinuz-linux
 ${ucode_line}initrd  /initramfs-linux.img
 options root=PARTUUID=${root_partuuid}${sb_rootflags} rw quiet${extra_options}
 EOF"
 
     # フォールバックエントリ
-    run_cmd "arch-fallback.conf 作成" bash -c "cat > /mnt/boot/loader/entries/arch-fallback.conf << EOF
-title   Arch Linux (fallback)
+    # 【重要】フォールバック用イメージがあるときだけ作ること。
+    # mkinitcpio v40（2025年11月）から、既定のプリセットは fallback イメージを
+    # 作らなくなった。無条件に書くと、選ぶと起動できない項目がメニューに残る。
+    if [[ "${CONFIG[dry_run]}" != "yes" && -f /mnt/boot/initramfs-linux-fallback.img ]]; then
+      run_cmd "起動エントリ作成 (esca-fallback.conf)" bash -c "cat > /mnt/boot/loader/entries/esca-fallback.conf << EOF
+title   ${OS_NAME} (fallback)
 linux   /vmlinuz-linux
 ${ucode_line}initrd  /initramfs-linux-fallback.img
 options root=PARTUUID=${root_partuuid}${sb_rootflags} rw${extra_options}
 EOF"
+    fi
 
     # pacman フック（カーネル更新時に自動更新）
     run_cmd "systemd-boot 自動更新フック設定" \
@@ -3816,7 +3839,7 @@ EOF"
         arch-chroot /mnt grub-install \
           --target=x86_64-efi \
           --efi-directory=/boot \
-          --bootloader-id=GRUB
+          --bootloader-id=Esca
     else
       run_cmd "GRUB インストール (BIOS)" \
         arch-chroot /mnt grub-install \
@@ -3836,6 +3859,16 @@ EOF"
         fi
       "
     fi
+
+    # GRUB メニューの項目名を Esca Linux にする（既定は "Arch Linux"）。
+    # grub-mkconfig は GRUB_DISTRIBUTOR を項目名に使う。
+    run_cmd "GRUB メニュー名を ${OS_NAME} に設定" bash -c "
+      if [[ -f /mnt/etc/default/grub ]]; then
+        sed -i 's/^GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR=\"${OS_NAME}\"/' /mnt/etc/default/grub
+        grep -q '^GRUB_DISTRIBUTOR=' /mnt/etc/default/grub \
+          || echo 'GRUB_DISTRIBUTOR=\"${OS_NAME}\"' >> /mnt/etc/default/grub
+      fi
+    "
 
     # Windows 等の他OSを検出してGRUBメニューに追加（os-prober を有効化）
     if [[ "${CONFIG[dualboot_windows]}" == "yes" ]]; then
@@ -7460,7 +7493,7 @@ run_install() {
     echo -e "  ${BOLD}UEFI から一時的に起動デバイスを選ぶ場合:${RESET}"
     echo -e "    再起動時に ${BOLD}F12${RESET}（または F8/F10）を押して"
     echo -e "    Boot Menu を開き、外付けデバイスを選択してください。\n"
-    echo -e "  ${BOLD}インストール済み Arch の UEFI エントリを確認:${RESET}"
+    echo -e "  ${BOLD}インストール済みの UEFI エントリを確認:${RESET}"
     echo -e "    ${BOLD}efibootmgr -v${RESET}"
   fi
 }
