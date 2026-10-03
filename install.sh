@@ -534,12 +534,17 @@ EOF
       ;;
 
     cosmic)
-      # cosmic-bg はシステム既定を /usr/share/cosmic/ 配下から読む
-      # （パッケージ自身が同じ場所に既定値を置いている）。
+      # 【重要】/usr/share/cosmic/com.system76.CosmicBackground/v1/all は書き換えないこと。
+      # このファイルは cosmic-bg パッケージ自身の所有物で、上書きしても
+      # 次に cosmic-bg が更新された時点で元の壁紙に戻ってしまう。
+      # cosmic-config は「ユーザー設定 → システム既定」の順に読むので、
+      # 同じ内容を /etc/skel 側（各ユーザーの ~/.config/cosmic/...）に置く。
+      # skel は後から作るユーザーにも useradd -m で配られる。
       # 書式は RON。真偽値が #true 表記である点に注意（true では読めない）。
-      run_cmd "壁紙: COSMIC システム既定を配置" bash -c "
-        mkdir -p /mnt/usr/share/cosmic/com.system76.CosmicBackground/v1
-        cat > /mnt/usr/share/cosmic/com.system76.CosmicBackground/v1/all << EOF
+      # 項目は cosmic-bg 同梱の既定ファイル（data/v1/all）と同じ構成。
+      run_cmd "壁紙: COSMIC の既定壁紙を配置" bash -c "
+        mkdir -p ${SKEL_ROOT}/.config/cosmic/com.system76.CosmicBackground/v1
+        cat > ${SKEL_ROOT}/.config/cosmic/com.system76.CosmicBackground/v1/all << EOF
 (
     output: \"all\",
     source: Path(\"${wp}\"),
@@ -6520,6 +6525,31 @@ Rectangle {
     // 発光の脈動。theme.conf の animateGlow=false で止められる。
     // 文字列で来るため "false" との比較で判定する。
     readonly property bool animateGlow: (typeof config !== "undefined" && String(config.animateGlow) === "false") ? false : true
+    // 下部ボタンの表示。theme.conf の showSessionButton / showPowerButtons=false で隠す。
+    // 【重要】theme.conf に項目を書くだけでは何も起きない。ここで読んで visible に
+    // つなぐこと（以前は項目だけあって、変えても表示が変わらなかった）。
+    readonly property bool showSessionButton: (typeof config !== "undefined" && String(config.showSessionButton) === "false") ? false : true
+    readonly property bool showPowerButtons: (typeof config !== "undefined" && String(config.showPowerButtons) === "false") ? false : true
+
+    // 日付は日本語ロケールで固定して書式化する。
+    // グリーターのロケールが日本語でない場合に曜日が "Saturday" と英語になるのを防ぐ。
+    readonly property var jaLocale: Qt.locale("ja_JP")
+    function dateText(d) { return d.toLocaleDateString(root.jaLocale, "yyyy年M月d日 dddd") }
+
+    // 起動時に選ばれているセッション名を取得する。
+    // 【重要】これが無いと、利用者がセッション一覧を開くまでボタンが
+    // 「セッション: 」だけの空表示になる。Repeater は表示されなくても
+    // 全要素を作るので、一覧が閉じていても確実に名前を拾える。
+    Repeater {
+        model: sessionModel
+        delegate: Item {
+            required property int index
+            required property string name
+            Component.onCompleted: {
+                if (index === root.sessionIndex) root.currentSessionName = name
+            }
+        }
+    }
 
     // ============================================
     // 背景
@@ -6572,7 +6602,7 @@ Rectangle {
             color: root.textDim
             font.family: root.uiFont
             font.pixelSize: 17
-            text: Qt.formatDateTime(new Date(), "yyyy年M月d日 dddd")
+            text: root.dateText(new Date())
         }
     }
 
@@ -6583,7 +6613,7 @@ Rectangle {
         onTriggered: {
             var now = new Date()
             clockTime.text = Qt.formatDateTime(now, "HH:mm")
-            clockDate.text = Qt.formatDateTime(now, "yyyy年M月d日 dddd")
+            clockDate.text = root.dateText(now)
         }
     }
 
@@ -6621,10 +6651,12 @@ Rectangle {
             width: parent.width
             placeholder: "ユーザー名"
             text: userModel.lastUser
+            fontFamily: root.uiFont
             accentColor: root.rodLight
             textColor: root.textMain
             hintColor: root.textDim
             onAccepted: passField.forceFocus()
+            onTabPressed: passField.forceFocus()
         }
 
         InputField {
@@ -6632,10 +6664,12 @@ Rectangle {
             width: parent.width
             placeholder: "パスワード"
             echoMode: TextInput.Password
+            fontFamily: root.uiFont
             accentColor: root.rodLight
             textColor: root.textMain
             hintColor: root.textDim
             onAccepted: root.doLogin()
+            onTabPressed: userField.forceFocus()
         }
 
         Text {
@@ -6643,6 +6677,7 @@ Rectangle {
             text: root.errorText
             color: root.errorRed
             font.pixelSize: 14
+            font.family: root.uiFont
             visible: root.errorText !== ""
         }
 
@@ -6650,6 +6685,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             width: parent.width
             label: "ログイン"
+            fontFamily: root.uiFont
             primary: true
             accentColor: root.rodLight
             onClicked: root.doLogin()
@@ -6665,7 +6701,9 @@ Rectangle {
         anchors.bottom: parent.bottom
         anchors.margins: 36
         label: "セッション: " + root.currentSessionName
+        fontFamily: root.uiFont
         textColor: root.textMain
+        visible: root.showSessionButton
         onClicked: sessionPopup.visible = !sessionPopup.visible
     }
 
@@ -6677,21 +6715,25 @@ Rectangle {
         anchors.bottom: parent.bottom
         anchors.margins: 36
         spacing: 12
+        visible: root.showPowerButtons
 
         TextButton {
             label: "スリープ"
+            fontFamily: root.uiFont
             textColor: root.textMain
             visible: sddm.canSuspend
             onClicked: sddm.suspend()
         }
         TextButton {
             label: "再起動"
+            fontFamily: root.uiFont
             textColor: root.textMain
             visible: sddm.canReboot
             onClicked: sddm.reboot()
         }
         TextButton {
             label: "シャットダウン"
+            fontFamily: root.uiFont
             textColor: root.textMain
             visible: sddm.canPowerOff
             onClicked: sddm.powerOff()
@@ -6726,7 +6768,9 @@ Rectangle {
                 width: sessionList.width - 12
                 height: 40
                 radius: 4
-                color: hover.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : "transparent"
+                // 選択中のセッションは常に薄く強調し、どれが選ばれているか分かるようにする
+                color: hover.containsMouse ? Qt.rgba(1, 1, 1, 0.10)
+                     : (sessionRow.index === root.sessionIndex ? Qt.rgba(1, 1, 1, 0.06) : "transparent")
 
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
@@ -6735,6 +6779,7 @@ Rectangle {
                     text: sessionRow.name
                     color: root.textMain
                     font.pixelSize: 14
+                    font.family: root.uiFont
                 }
 
                 MouseArea {
@@ -6808,8 +6853,10 @@ Rectangle {
     property color textColor: "#e8f2f8"
     property color hintColor: "#7f9db3"
     property color accentColor: "#9adcf5"
+    property string fontFamily: ""
 
     signal accepted()
+    signal tabPressed()
 
     height: 48
     radius: 6
@@ -6833,7 +6880,11 @@ Rectangle {
         selectionColor: field.accentColor
         selectedTextColor: "#081726"
         clip: true
+        font.family: field.fontFamily
         onAccepted: field.accepted()
+        // Tab でユーザー名とパスワードを行き来できるようにする
+        Keys.onTabPressed: field.tabPressed()
+        Keys.onBacktabPressed: field.tabPressed()
     }
 
     Text {
@@ -6843,6 +6894,7 @@ Rectangle {
         text: field.placeholder
         color: field.hintColor
         font.pixelSize: 16
+        font.family: field.fontFamily
         visible: input.text.length === 0 && !input.activeFocus
     }
 
@@ -6867,6 +6919,7 @@ Rectangle {
     property bool primary: false
     property color accentColor: "#9adcf5"
     property color textColor: "#e8f2f8"
+    property string fontFamily: ""
 
     signal clicked()
 
@@ -6899,6 +6952,7 @@ Rectangle {
         color: button.primary ? "#081726" : button.textColor
         font.pixelSize: 15
         font.bold: button.primary
+        font.family: button.fontFamily
     }
 
     MouseArea {
