@@ -126,6 +126,22 @@ eq "TERM=linux では [OK]"       "$(TERM=linux bash -c "source '${ROOT_DIR}/ins
 eq "それ以外の端末では記号"       "$(TERM=xterm-256color bash -c "source '${ROOT_DIR}/install.sh'; echo \"\$ICON_OK\$ICON_WARN\$ICON_ERR\"")" "✔⚠✘"
 
 # --------------------------------------------
+section "niri の壁紙行の重複防止 (_conf_append_once)"
+# dotfiles の wallpaper_restore.sh 経由の行があるのに固定画像の swaybg を
+# 追記してしまい、選んだ壁紙が再ログインで戻っていた不具合の回帰テスト
+_kdl="$(mktemp)"
+_swaybg_line='spawn-at-startup "swaybg" "-i" "/usr/share/backgrounds/esca/esca.png" "-m" "fill"'
+printf '%s\n' 'spawn-at-startup "sh" "-c" "bash $HOME/.config/waybar/scripts/wallpaper_restore.sh"' > "$_kdl"
+_conf_append_once "$_kdl" "$NIRI_WALLPAPER_SPAWN_RE" "$_swaybg_line"
+eq "wallpaper_restore.sh の行があれば swaybg を追記しない" "$(grep -c swaybg "$_kdl")" "0"
+printf '%s\n' 'spawn-at-startup "waybar"' '// spawn-at-startup "swaybg" "-c" "#000000"' > "$_kdl"
+_conf_append_once "$_kdl" "$NIRI_WALLPAPER_SPAWN_RE" "$_swaybg_line"
+eq "コメントアウトされた swaybg 行は「設定済み」扱いにしない" "$(grep -c '^spawn-at-startup "swaybg"' "$_kdl")" "1"
+_conf_append_once "$_kdl" "$NIRI_WALLPAPER_SPAWN_RE" "$_swaybg_line"
+eq "swaybg の行があれば二重に追記しない" "$(grep -c '^spawn-at-startup "swaybg"' "$_kdl")" "1"
+rm -f "$_kdl"
+
+# --------------------------------------------
 section "その他"
 eq "_join: 区切りでつなぐ"      "$(_join '、' Chrome yay OpenSSH)" "Chrome、yay、OpenSSH"
 eq "_join: 空なら「なし」"      "$(_join '、')" "なし"
