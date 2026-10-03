@@ -1299,13 +1299,13 @@ step_partition_scheme() {
 
   local scheme
   scheme=$(select_from_list "パーティション構成を選択:" \
-    "自動（推奨） - EFI 512M + / のみ（swap なし・zram 推奨）" \
-    "自動 - EFI 512M + swap (RAM同容量) + /（ハイバネート使用時）" \
+    "自動（推奨） - EFI 1G + / のみ（swap なし・zram 推奨）" \
+    "自動 - EFI 1G + swap (RAM同容量) + /（ハイバネート使用時）" \
     "手動（fdisk を起動）")
 
   case "$scheme" in
-    "自動（推奨） - EFI 512M + / のみ（swap なし・zram 推奨）") CONFIG[partition_scheme]="auto_noswap" ;;
-    "自動 - EFI 512M + swap (RAM同容量) + /（ハイバネート使用時）") CONFIG[partition_scheme]="auto_swap" ;;
+    "自動（推奨） - EFI 1G + / のみ（swap なし・zram 推奨）") CONFIG[partition_scheme]="auto_noswap" ;;
+    "自動 - EFI 1G + swap (RAM同容量) + /（ハイバネート使用時）") CONFIG[partition_scheme]="auto_swap" ;;
     "手動（fdisk を起動）")                                        CONFIG[partition_scheme]="manual" ;;
   esac
   print_ok "パーティション構成: $(_label partition_scheme)"
@@ -1963,6 +1963,14 @@ step_fonts() {
   pkgs+=(ttf-fira-code)
   print_ok "ttf-fira-code を追加（固定）"
 
+  # Nerd Font のアイコン（記号だけのフォント）。DE を問わず入れること。
+  # starship のプロンプト記号は Nerd Font の私用領域の文字で、starship は全構成に
+  # 入るのに、Nerd Font は Hyprland / Niri にしか入れていなかった。そのため
+  # GNOME・KDE・Xfce・COSMIC などの端末ではプロンプトのアイコンが □ になる。
+  # 記号専用なので、既存の等幅フォントの見た目は変えずにフォールバックで効く。
+  pkgs+=(ttf-nerd-fonts-symbols-mono)
+  print_ok "ttf-nerd-fonts-symbols-mono（Nerd Font のアイコン）を追加（固定）"
+
   CONFIG[font_pkgs]="${pkgs[*]}"
   CONFIG[font_setup_fontconfig]="yes"
   echo ""
@@ -2147,8 +2155,8 @@ step_extra_packages() {
 _label() {
   local kind="$1" v="${2-${CONFIG[$1]:-}}"
   case "$kind:$v" in
-    partition_scheme:auto_noswap) echo "自動（EFI 512M + /・swap なし）" ;;
-    partition_scheme:auto_swap)   echo "自動（EFI 512M + swap + /）" ;;
+    partition_scheme:auto_noswap) echo "自動（EFI 1G + /・swap なし）" ;;
+    partition_scheme:auto_swap)   echo "自動（EFI 1G + swap + /）" ;;
     partition_scheme:manual)      echo "手動（fdisk）" ;;
     boot_mode:uefi)               echo "UEFI" ;;
     boot_mode:bios)               echo "BIOS（レガシー）" ;;
@@ -2341,9 +2349,13 @@ do_partition() {
   run_cmd "GPT テーブル初期化" sgdisk --zap-all "$disk"
 
   if [[ "$boot_mode" == "uefi" ]]; then
-    # EFI パーティション (512MB)
+    # EFI パーティション (1GB)
+    # 【重要】512MB にしないこと。systemd-boot はカーネルと initramfs（fallback 含む）を
+    # ESP に置くため、NVIDIA のモジュールを入れた initramfs や LTS カーネルの追加で
+    # 512MB では足りなくなり、カーネル更新が「空き容量不足」で失敗する。
+    # Arch の推奨も 1GB。
     run_cmd "EFI パーティション作成" \
-      sgdisk --new=1:0:+512M --typecode=1:ef00 --change-name=1:EFI "$disk"
+      sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:EFI "$disk"
 
     if [[ "$scheme" == "auto_swap" ]]; then
       # swap (RAM 同容量)
@@ -3047,19 +3059,24 @@ do_pacstrap() {
     # pacstrap が「target not found」で止まる（ディスク消去後に）。
     # カーネルモジュール名（nvidia / nvidia_drm など）は従来と同じ。
     nvidia)  pkgs+=(nvidia-open nvidia-utils) ;;
-    nouveau) pkgs+=(xf86-video-nouveau mesa) ;;
+    # vulkan-nouveau（NVK）: nouveau 用の Vulkan ドライバ。無いと Vulkan を使う
+    # アプリやブラウザの一部機能がソフトウェア描画（llvmpipe）に落ちる。
+    nouveau) pkgs+=(xf86-video-nouveau mesa vulkan-nouveau) ;;
     amdgpu)  pkgs+=(xf86-video-amdgpu mesa vulkan-radeon) ;;
     intel)
       # xf86-video-intel は X11 専用。Wayland DE では mesa + vulkan-intel のみで十分
+      # intel-media-driver は動画のハードウェアデコード（VA-API, iHD）で、DE を問わず入れる。
+      # Broadwell（第5世代 Core）以降が対象で、これが無いと Firefox や mpv の
+      # 動画再生が CPU デコードになり、負荷とバッテリー消費が大きく増える。
       local is_wayland_de="no"
       case "${CONFIG[desktop]}" in
         gnome|kde|hyprland|niri|cosmic|budgie) is_wayland_de="yes" ;;
       esac
       if [[ "$is_wayland_de" == "yes" ]]; then
-        pkgs+=(mesa vulkan-intel)
-        print_ok "Intel GPU (Wayland): mesa + vulkan-intel（xf86-video-intel はスキップ）"
+        pkgs+=(mesa vulkan-intel intel-media-driver)
+        print_ok "Intel GPU (Wayland): mesa + vulkan-intel + intel-media-driver（xf86-video-intel はスキップ）"
       else
-        pkgs+=(xf86-video-intel mesa vulkan-intel)
+        pkgs+=(xf86-video-intel mesa vulkan-intel intel-media-driver)
       fi
       ;;
     virtual) pkgs+=(xf86-video-vmware) ;;
