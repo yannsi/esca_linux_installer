@@ -3170,7 +3170,11 @@ _collect_pacstrap_pkgs() {
         _ps+=(xf86-video-intel mesa vulkan-intel intel-media-driver)
       fi
       ;;
-    virtual) _ps+=(xf86-video-vmware) ;;
+    # 【重要】xf86-video-vmware は使わないこと。Mesa の gallium-xa 廃止に伴い
+    # Arch のリポジトリから外れ、指定すると pacstrap が target not found で止まる
+    # （2026-10 の定期チェックで検出）。仮想 GPU（VMware SVGA / virtio / QXL）は
+    # Xorg 標準の modesetting と Mesa で動くので、mesa だけでよい（coffee 版と同じ）。
+    virtual) _ps+=(mesa) ;;
   esac
 
   # 仮想環境ゲストツールの追加
@@ -5584,7 +5588,8 @@ _desktop_pkg_lists() {
   [[ "${CONFIG[desktop]}" == "gnome" ]] && _dt_common+=(gnome-keyring)
 
   # 初心者向け推奨アプリ（unzip/git 等の軽量ツール。LibreOffice は選択制）
-  _dt_common+=(unzip p7zip wget curl git nano htop)
+  # 7zip: 本家 7-Zip。p7zip は旧名で、今は 7zip が引き継いでいる（provides）。
+  _dt_common+=(unzip 7zip wget curl git nano htop)
   # LibreOffice 本体 + 日本語言語パック(-ja)。本体だけだと UI が英語のままなので、
   # ロケールが日本語でも -ja を入れて初めて UI が日本語になる。
   if [[ "${CONFIG[install_office]:-no}" == "yes" ]]; then
@@ -5600,7 +5605,10 @@ _desktop_pkg_lists() {
       # 入らないため、Wi-Fi を選ぶ GUI も音量アプレットも画面設定も無い状態になる。
       # 有線が無いノートでは、そこから復旧する手段が nmtui しか残らない。
       # plasma-meta（標準/フル）には含まれるので、--needed により重複は無害。
-      _dt_pkgs=(sddm-kcm konsole dolphin colord-kde
+      # 【重要】colord-kde は入れないこと。Arch のリポジトリから外れており、
+      # 指定すると KDE の導入トランザクションがまるごと失敗する
+      # （2026-10 の定期チェックで検出）。
+      _dt_pkgs=(sddm-kcm konsole dolphin
                   plasma-nm plasma-pa kscreen bluedevil)
       if [[ "${CONFIG[kde_apps]}" == "minimal" ]]; then
         _dt_pkgs+=(plasma-desktop)
