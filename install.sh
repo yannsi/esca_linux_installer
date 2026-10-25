@@ -3137,6 +3137,12 @@ do_pacstrap() {
 do_fstab() {
   print_step "fstab 生成"
   run_cmd "fstab 生成" bash -c "genfstab -U /mnt > /mnt/etc/fstab"
+  # ESP(vfat) を root 専用にする。genfstab はマウント時の fmask/dmask=0022 を
+  # そのまま書くため、systemd-boot の random-seed が全ユーザーから読めてしまい、
+  # 起動のたびに bootctl が「world accessible」の警告を出す。
+  run_cmd "ESP を root 専用に設定" sed -i -E \
+    '/^[^#[:space:]]+[[:space:]]+\/boot[[:space:]]+vfat[[:space:]]/ { s/fmask=[0-7]+/fmask=0077/; s/dmask=[0-7]+/dmask=0077/ }' \
+    /mnt/etc/fstab
   if [[ -f /mnt/etc/fstab ]]; then
     print_ok "生成内容:"
     sed 's/^/    /' /mnt/etc/fstab
