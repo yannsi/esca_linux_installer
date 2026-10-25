@@ -83,14 +83,31 @@ _add xclip wl-clipboard
 
 # --- 確認 ---
 mapfile -t pkgs < <(printf '%s\n' "${!ALL[@]}" | sort)
-missing=()
+missing=() aliased=()
 for p in "${pkgs[@]}"; do
   pacman -Si -- "$p" > /dev/null 2>&1 && continue
   pacman -Sg -- "$p" > /dev/null 2>&1 && continue
+  # 名前そのものは無くても、別のパッケージが provides で引き継いでいれば
+  # pacman -S は通る（p7zip → 7zip のような改名）。インストールは止まらないので
+  # 失敗にはせず、「新しい名前に書き換えたほうがよい」として別に報告する。
+  if LC_ALL=C pacman -Sp --noconfirm --print-format '%n' -- "$p" > /dev/null 2>&1 < /dev/null; then
+    aliased+=("$p")
+    continue
+  fi
   missing+=("$p")
 done
 
 echo "確認したパッケージ: ${#pkgs[@]} 件（$(basename "$SCRIPT")）"
+if [[ "${#aliased[@]}" -gt 0 ]]; then
+  echo ""
+  echo "旧名のまま（別のパッケージが引き継いでいるため、インストールは通る）: ${#aliased[@]} 件"
+  printf '  - %s\n' "${aliased[@]}"
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    for p in "${aliased[@]}"; do
+      echo "::warning title=旧名のパッケージ（新しい名前への書き換えを推奨）::${p}"
+    done
+  fi
+fi
 if [[ "${#missing[@]}" -gt 0 ]]; then
   echo ""
   echo "公式リポジトリに見つからないパッケージ: ${#missing[@]} 件"
