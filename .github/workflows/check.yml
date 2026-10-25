@@ -27,10 +27,11 @@ jobs:
           bash -n build-iso.sh
           bash -n tests/unit.sh
           bash -n tests/dryrun.sh
+          bash -n tests/pkgcheck.sh
       - name: shellcheck（警告レベル）
         run: |
           shellcheck -S warning install.sh build-iso.sh
-          shellcheck -x -P SCRIPTDIR -S warning tests/unit.sh tests/dryrun.sh
+          shellcheck -x -P SCRIPTDIR -S warning tests/unit.sh tests/dryrun.sh tests/pkgcheck.sh
 
   unit:
     name: 単体テスト

@@ -268,6 +268,7 @@ push のたびに GitHub Actions（`.github/workflows/check.yml`）で次を自�
 | 構文・shellcheck | `bash -n` と shellcheck（警告レベル） | `shellcheck -S warning install.sh build-iso.sh` |
 | 単体テスト | GPU 判定・initramfs 設定・確認画面の幅・パッケージ一覧と事前確認・引数の扱いなど | `bash tests/unit.sh` |
 | ドライランの通しテスト | 回答を自動入力して `--dry-run` を最後まで実行 | `sudo bash tests/dryrun.sh` |
+| パッケージ名の定期チェック | 入れる公式パッケージが今の Arch に存在するか（毎週月曜と、`install.sh` の変更時。`packages.yml`） | Arch 上で `pacman -Sy` のあと `bash tests/pkgcheck.sh` |
 | ログイン画面の描画 | SDDM テーマを実際に描画し、表示と操作を確認 | `python3 tests/sddm_render.py --out sddm.png`（要 PySide6） |
 
 `install.sh` は `source` しても `main` を実行しないので、テストから関数を直接呼べます。

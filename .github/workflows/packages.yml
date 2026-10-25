@@ -1,0 +1,36 @@
+# 公式パッケージ名の定期チェック。
+# インストーラーが入れるパッケージが今の Arch に存在するかを毎週確かめる。
+# Arch 側の名前変更・提供終了（例: 2025年12月の nvidia → nvidia-open）に、
+# インストールで止まる前に気付くためのもの。失敗すると GitHub からメールが届く。
+#
+# 【注意】GitHub は、リポジトリに 60 日間 push などの動きが無いと
+# 定期実行（schedule）を自動で止める。止まると GitHub からメールが届くので、
+# 「Actions」タブでこのワークフローを開き「Enable workflow」を押せば再開する。
+name: パッケージ名の定期チェック
+
+on:
+  schedule:
+    # 毎週月曜 3:17（日本時間）。cron は UTC で書くため日曜 18:17 になる。
+    # 毎時0分は GitHub 側が混み合って遅れやすいので、半端な分にしている。
+    - cron: "17 18 * * 0"
+  push:
+    paths:
+      - "install.sh"
+      - "tests/pkgcheck.sh"
+      - ".github/workflows/packages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pkgcheck:
+    name: 公式パッケージの存在確認
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: パッケージ情報の取得
+        run: pacman -Sy --noconfirm
+      - name: 存在確認
+        run: bash tests/pkgcheck.sh
