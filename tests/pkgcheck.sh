@@ -98,6 +98,16 @@ if [[ "${#missing[@]}" -gt 0 ]]; then
   echo ""
   echo "名前が変わったか、提供が終わった可能性があります。"
   echo "Arch のニュース (https://archlinux.org/news/) とパッケージ検索で確認してください。"
+  # GitHub Actions では注釈（annotation）としても出す。ログを開かなくても、
+  # 実行結果の画面とメール通知の一覧に、見つからない名前がそのまま表示される。
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    for p in "${missing[@]}"; do
+      echo "::error title=公式リポジトリに見つからないパッケージ::${p}"
+    done
+  fi
   exit 1
 fi
 echo "結果: すべて存在します"
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  echo "::notice title=パッケージ名の確認::${#pkgs[@]} 件すべて存在します"
+fi
