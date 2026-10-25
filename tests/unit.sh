@@ -142,6 +142,67 @@ eq "swaybg の行があれば二重に追記しない" "$(grep -c '^spawn-at-sta
 rm -f "$_kdl"
 
 # --------------------------------------------
+section "pacman.conf の調整 (tune_pacman_conf)"
+# pacman 7 以降は ParallelDownloads が最初から有効な状態で配布される
+_conf=$(mktemp)
+printf '[options]\n#Color\nParallelDownloads = 5\n' > "$_conf"
+tune_pacman_conf "$_conf"
+eq "有効な ParallelDownloads も 10 にする" "$(grep '^ParallelDownloads' "$_conf")" "ParallelDownloads = 10"
+eq "Color を有効にする"                    "$(grep -c '^Color$' "$_conf")" "1"
+printf '[options]\n#ParallelDownloads = 5\n' > "$_conf"
+tune_pacman_conf "$_conf"
+eq "コメントアウトされた ParallelDownloads も 10 にする" "$(grep '^ParallelDownloads' "$_conf")" "ParallelDownloads = 10"
+rm -f "$_conf"
+
+# --------------------------------------------
+section "パッケージ一覧 (_collect_pacstrap_pkgs / _desktop_pkg_lists)"
+_has() { [[ " $1 " == *" $2 "* ]]; }
+_pl=$(CONFIG[gpu_driver]=nvidia; CONFIG[jp_ime]=fcitx5-mozc; _l=(); _collect_pacstrap_pkgs _l quiet; echo "${_l[*]}")
+if _has "$_pl" nvidia-open; then ok "NVIDIA は nvidia-open"; else ng "NVIDIA は nvidia-open" "$_pl"; fi
+if _has "$_pl" nvidia; then ng "旧名 nvidia を入れない" "$_pl"; else ok "旧名 nvidia を入れない"; fi
+if _has "$_pl" fcitx5-mozc; then ok "fcitx5-mozc が入る"; else ng "fcitx5-mozc が入る" "$_pl"; fi
+if [[ "$_pl" == *ibus* ]]; then ng "AUR にしかない ibus-mozc を入れない" "$_pl"; else ok "AUR にしかない ibus-mozc を入れない"; fi
+eq "quiet では何も表示しない" "$(_l=(); _collect_pacstrap_pkgs _l quiet)" ""
+_dl=$(CONFIG[desktop]=gnome; CONFIG[dm]=gdm; _c=(); _d=(); _desktop_pkg_lists _c _d; echo "${_d[*]}|${_c[*]}")
+if _has "${_dl%%|*}" gnome; then ok "GNOME 本体が入る"; else ng "GNOME 本体が入る" "$_dl"; fi
+if _has "${_dl#*|}" gnome-keyring && _has "${_dl#*|}" gdm; then ok "GNOME の共通側に gnome-keyring と gdm"; else ng "GNOME の共通側に gnome-keyring と gdm" "$_dl"; fi
+_dl=$(CONFIG[desktop]=niri; CONFIG[dm]=none; _c=(); _d=(); _desktop_pkg_lists _c _d; echo "${_d[*]}")
+if _has "$_dl" zenity && _has "$_dl" niri; then ok "niri は Waybar 依存も含む"; else ng "niri は Waybar 依存も含む" "$_dl"; fi
+
+# --------------------------------------------
+section "ディスク消去前のパッケージ確認 (_preflight_pkgs)"
+# pacman を偽物の関数に差し替えて、見つからないパッケージがあると止まることを確かめる
+_out=$(
+  pacman() {
+    case "$*" in
+      *-Sy*) return 0 ;;
+      *-Sp*) echo "error: target not found: nosuchpkg" >&2; return 1 ;;
+    esac
+  }
+  CONFIG[dry_run]=no; CONFIG[desktop]=none
+  _preflight_pkgs 2>&1
+); _rc=$?
+eq "見つからないパッケージがあれば止まる" "$_rc:$(grep -c '公式リポジトリに見つかりません: nosuchpkg' <<< "$_out")" "1:1"
+_out=$(
+  pacman() {
+    case "$*" in
+      *-Sy*) return 0 ;;
+      *-Sp*) echo "error: unresolvable package conflicts detected" >&2; return 1 ;;
+    esac
+  }
+  CONFIG[dry_run]=no; CONFIG[desktop]=none
+  _preflight_pkgs 2>&1
+); _rc=$?
+eq "名前以外の問題では止めない（警告のみ）" "$_rc:$(grep -c '確認できない項目があります' <<< "$_out")" "0:1"
+
+# --------------------------------------------
+section "コマンドライン引数"
+_out=$(bash "${ROOT_DIR}/install.sh" --dryrun 2>&1); _rc=$?
+eq "打ち間違い（--dryrun）は起動せずに止まる" "$_rc:$(grep -c '不明なオプションです: --dryrun' <<< "$_out")" "1:1"
+_out=$(bash "${ROOT_DIR}/install.sh" --help 2>&1); _rc=$?
+eq "--help は使い方を出して終わる" "$_rc:$(grep -c '使い方:' <<< "$_out")" "0:1"
+
+# --------------------------------------------
 section "その他"
 eq "_join: 区切りでつなぐ"      "$(_join '、' Chrome yay OpenSSH)" "Chrome、yay、OpenSSH"
 eq "_join: 空なら「なし」"      "$(_join '、')" "なし"

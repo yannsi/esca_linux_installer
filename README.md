@@ -64,6 +64,7 @@ sudo bash install.sh --dry-run
 ```
 
 ディスクへの書き込みとパッケージのインストールを一切行わず、対話の流れと生成される設定ファイルだけを確認できます。
+知らないオプション（`--dryrun` のような打ち間違いを含む）を渡すと、何も始めずに終了します。使えるオプションは `--help` で確認できます。
 生成物は一時ディレクトリに出力され、実行開始時にパスが表示されます。
 
 > Live 環境の `/mnt` を汚さないよう、書き込み先を退避したうえで生成処理そのものは実行します。
@@ -265,7 +266,7 @@ push のたびに GitHub Actions（`.github/workflows/check.yml`）で次を自�
 | テスト | 内容 | 手元で動かす場合 |
 |---|---|---|
 | 構文・shellcheck | `bash -n` と shellcheck（警告レベル） | `shellcheck -S warning install.sh build-iso.sh` |
-| 単体テスト | GPU 判定・initramfs 設定・確認画面の幅など | `bash tests/unit.sh` |
+| 単体テスト | GPU 判定・initramfs 設定・確認画面の幅・パッケージ一覧と事前確認・引数の扱いなど | `bash tests/unit.sh` |
 | ドライランの通しテスト | 回答を自動入力して `--dry-run` を最後まで実行 | `sudo bash tests/dryrun.sh` |
 | ログイン画面の描画 | SDDM テーマを実際に描画し、表示と操作を確認 | `python3 tests/sddm_render.py --out sddm.png`（要 PySide6） |
 
