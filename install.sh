@@ -147,6 +147,8 @@ declare -A CONFIG=(
   [dry_run]="$DRY_RUN"
   [log_file]="$LOG_FILE"
   [gpu_driver]="none"
+  # NVIDIA と同居する内蔵 GPU: intel / amdgpu / 空（_detect_igpu が決める）
+  [gpu_igpu]=""
   [aur_helper]="yay"
   [extra_ssh]="yes"
   [extra_ufw]="no"
@@ -859,7 +861,10 @@ _read_input() {
   local src="$2" dst="$3" mode="${4:-normal}"
   local rc=0
   if [[ "$mode" == "silent" ]]; then
-    read -rs _dest_ref < "$src" || rc=$?
+    # 【重要】IFS= を付けること。付けないと read が前後の空白を黙って削り、
+    # 空白で始まる／終わるパスワードが「入力したものと違う文字列」で登録される
+    # （確認入力も同じように削られるので一致してしまい、気付けない）。
+    IFS= read -rs _dest_ref < "$src" || rc=$?
   else
     read -r _dest_ref < "$src" || rc=$?
   fi
@@ -1420,6 +1425,26 @@ _detect_gpu() {
   fi
 }
 
+# NVIDIA と同居している内蔵 GPU（ハイブリッド構成のノート PC など）を返す。
+# 戻り値: intel / amdgpu / 空（NVIDIA 以外の表示デバイスが無い）
+#
+# 【経緯】NVIDIA を見つけた時点で判定を終えていたため、Intel + NVIDIA のノートでは
+# 内蔵側のドライバ（vulkan-intel / intel-media-driver）が入らなかった。
+# こうした機種で画面を出しているのは内蔵 GPU のほうで、動画のハードウェア
+# デコードも内蔵側が担当するため、抜けると再生が CPU 処理になる。
+# 引数1: lspci の表示デバイス行
+_detect_igpu() {
+  local others
+  others=$(grep -vi 'NVIDIA' <<< "$1" || true)
+  if grep -qE 'Advanced Micro Devices|\b(AMD|ATI)\b|Radeon' <<< "$others"; then
+    echo "amdgpu"
+  elif grep -qiw 'Intel' <<< "$others"; then
+    echo "intel"
+  else
+    echo ""
+  fi
+}
+
 # ============================================
 # ステップ 3: システム設定
 # ============================================
@@ -1505,10 +1530,15 @@ step_system() {
 
   # GPU を自動検出して推奨を提示（判定本体は _detect_gpu。テストから直接呼べるよう分けている）
   local detected_gpu="" recommended="" gpu_result
-  gpu_result=$(_detect_gpu \
-    "$(lspci -nn 2>/dev/null | grep -E '\[03[0-9a-f]{2}\]:' || true)" \
-    "$(systemd-detect-virt 2>/dev/null || true)")
+  local gpu_lines=""
+  gpu_lines=$(lspci -nn 2>/dev/null | grep -E '\[03[0-9a-f]{2}\]:' || true)
+  gpu_result=$(_detect_gpu "$gpu_lines" "$(systemd-detect-virt 2>/dev/null || true)")
   recommended="${gpu_result%%|*}"
+  # 修正メニューからやり直したときに前回の判定が残らないよう、毎回決め直す
+  CONFIG[gpu_igpu]=""
+  if [[ "$recommended" == "nvidia" || "$recommended" == "nouveau" ]]; then
+    CONFIG[gpu_igpu]=$(_detect_igpu "$gpu_lines")
+  fi
   detected_gpu="${gpu_result#*|}"
   if [[ "$recommended" == "nouveau" ]]; then
     print_warn "この NVIDIA GPU は現在の公式ドライバーの対象外のため、nouveau を使います。"
@@ -1520,6 +1550,9 @@ step_system() {
     # （検出失敗時のみ下の手動選択にフォールバック）
     CONFIG[gpu_driver]="$recommended"
     print_ok "検出された GPU: ${detected_gpu} → $(_label gpu_driver) のドライバーを自動選択"
+    if [[ -n "${CONFIG[gpu_igpu]}" ]]; then
+      print_ok "内蔵 GPU（${CONFIG[gpu_igpu]}）も検出 → 内蔵側のドライバーも導入します"
+    fi
     return
   fi
 
@@ -1657,7 +1690,15 @@ step_users() {
     #   input : 全キーボード入力を直接読める（キーロガーと同じ権限）
     #   storage / optical : systemd 以前の名残で、今は何も追加されない
     # video は brightnessctl など画面輝度の操作で使う場面があるため残す。
-    local ugroups="wheel,video"
+    #
+    # 【重要】wheel は sudo を付けたユーザーだけに入れること。
+    # polkit は wheel のメンバーを管理者として扱うため、sudoers に何も書かなくても
+    # 「pkexec + 自分のパスワード」で root になれてしまう。全員を wheel に入れると、
+    # sudo を「付与しない」と答えたユーザーにも管理者権限が渡る。
+    local ugroups="video"
+    if [[ "$usudo" != "no" ]]; then
+      ugroups="wheel,video"
+    fi
 
     # リストに追記（区切り文字は | ）
     local entry="${uname}|${upw}|${usudo}|${ushell}|${ugroups}"
@@ -3176,6 +3217,22 @@ _collect_pacstrap_pkgs() {
     # Xorg 標準の modesetting と Mesa で動くので、mesa だけでよい（coffee 版と同じ）。
     virtual) _ps+=(mesa) ;;
   esac
+
+  # ハイブリッド構成（NVIDIA + 内蔵 GPU）: 内蔵側のドライバも入れる（_detect_igpu 参照）
+  if [[ "${CONFIG[gpu_driver]}" == "nvidia" || "${CONFIG[gpu_driver]}" == "nouveau" ]]; then
+    case "${CONFIG[gpu_igpu]:-}" in
+      intel)
+        [[ "${CONFIG[gpu_driver]}" == "nvidia" ]] && _ps+=(mesa)
+        _ps+=(vulkan-intel intel-media-driver)
+        "$_say" "内蔵 Intel GPU 用に vulkan-intel + intel-media-driver を追加（ハイブリッド構成）"
+        ;;
+      amdgpu)
+        [[ "${CONFIG[gpu_driver]}" == "nvidia" ]] && _ps+=(mesa)
+        _ps+=(vulkan-radeon)
+        "$_say" "内蔵 AMD GPU 用に vulkan-radeon を追加（ハイブリッド構成）"
+        ;;
+    esac
+  fi
 
   # 仮想環境ゲストツールの追加
   case "${CONFIG[virt_env]}" in
