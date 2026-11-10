@@ -39,6 +39,11 @@ eq "QEMU/KVM は virtual"                    "$(_detect_gpu "$virtio" kvm)" "vir
 eq "仮想環境は GPU 名より優先"               "$(_detect_gpu "$intel" oracle)" "virtual|仮想環境 (oracle)"
 eq "判定できない GPU は空"                   "$(_detect_gpu '00:01.0 VGA compatible controller [0300]: Matrox G200eR2 [102b:0534]' none)" "|"
 eq "表示デバイスが無ければ空"                "$(_detect_gpu '' none)" "|"
+# ハイブリッド構成で内蔵側のドライバが抜けていた不具合の回帰テスト
+amd_igpu='05:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Rembrandt [Radeon 680M] [1002:1681] (rev c8)'
+eq "Intel + NVIDIA の内蔵側は intel"         "$(_detect_igpu "$intel"$'\n'"$rtx")" "intel"
+eq "AMD 内蔵 + NVIDIA の内蔵側は amdgpu"     "$(_detect_igpu "$amd_igpu"$'\n'"$rtx")" "amdgpu"
+eq "NVIDIA 単独なら内蔵側は空"               "$(_detect_igpu "$rtx")" ""
 
 # --------------------------------------------
 section "パーティション名 (part_suffix)"
@@ -160,6 +165,9 @@ _has() { [[ " $1 " == *" $2 "* ]]; }
 _pl=$(CONFIG[gpu_driver]=nvidia; CONFIG[jp_ime]=fcitx5-mozc; _l=(); _collect_pacstrap_pkgs _l quiet; echo "${_l[*]}")
 if _has "$_pl" nvidia-open; then ok "NVIDIA は nvidia-open"; else ng "NVIDIA は nvidia-open" "$_pl"; fi
 if _has "$_pl" nvidia; then ng "旧名 nvidia を入れない" "$_pl"; else ok "旧名 nvidia を入れない"; fi
+_hl=$(CONFIG[gpu_driver]=nvidia; CONFIG[gpu_igpu]=intel; _l=(); _collect_pacstrap_pkgs _l quiet; echo "${_l[*]}")
+if _has "$_hl" nvidia-open && _has "$_hl" vulkan-intel && _has "$_hl" intel-media-driver; then ok "Intel + NVIDIA は内蔵側のドライバも入る"; else ng "Intel + NVIDIA は内蔵側のドライバも入る" "$_hl"; fi
+if _has "$_pl" vulkan-intel; then ng "NVIDIA 単独では Intel 用を入れない" "$_pl"; else ok "NVIDIA 単独では Intel 用を入れない"; fi
 if _has "$_pl" fcitx5-mozc; then ok "fcitx5-mozc が入る"; else ng "fcitx5-mozc が入る" "$_pl"; fi
 if [[ "$_pl" == *ibus* ]]; then ng "AUR にしかない ibus-mozc を入れない" "$_pl"; else ok "AUR にしかない ibus-mozc を入れない"; fi
 eq "quiet では何も表示しない" "$(_l=(); _collect_pacstrap_pkgs _l quiet)" ""
