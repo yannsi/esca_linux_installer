@@ -69,6 +69,11 @@ for _ime in fcitx5-mozc fcitx5-anthy; do
   _l=(); _collect_pacstrap_pkgs _l quiet; _add "${_l[@]}"
 done; done; done; done; done; done; done
 
+# 持ち歩き用（マイクロコード両方・GPU 全部入り）
+CONFIG[portable]="yes"; CONFIG[gpu_driver]="portable"; CONFIG[virt_env]="none"
+_l=(); _collect_pacstrap_pkgs _l quiet; _add "${_l[@]}"
+CONFIG[portable]="no"
+
 # --- デスクトップ分 ---
 for _desk in kde gnome xfce budgie cosmic hyprland niri; do
 for _dm in sddm gdm lightdm cosmic-greeter greetd none; do

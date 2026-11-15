@@ -12,6 +12,7 @@ Esca はチョウチンアンコウの発光する疑似餌のことです。深
 - **日本語環境が初めから整っている** — ロケール・タイムゾーン・JIS キーボード・fcitx5-mozc・CJK フォントを既定で構成します。インストール直後から日本語が打てて、文字化け（豆腐）も起きません。
 - **8 種類のデスクトップ環境に対応** — GNOME / KDE / Xfce / Budgie / COSMIC / Hyprland / Niri / CLI のみ。DE ごとに必要なパッケージとディスプレイマネージャーの組み合わせを検証済みです。
 - **設定の引き継ぎ** — 今使っているマシンの `~/.config` か、GitHub 上の dotfiles リポジトリから設定を持ち込めます。新しいマシンでも見た目と操作感をそのまま再現できます。
+- **持ち歩き用の外付けディスク** — 外付け USB の SSD を選ぶと、いろいろな PC に挿して起動できる構成で入れられます。Windows / Mac ともファイルをやり取りできる共有領域（exFAT）も作れます。
 - **ドライラン** — ディスクに一切触れずに、生成される設定ファイルだけを確認できます。
 - **失敗したときに理由が分かる** — どのコマンドが何行目で落ちたかを表示し、全ログをインストール先の `/var/log/` に残します。
 
@@ -90,7 +91,27 @@ sudo bash install.sh --dry-run
 | 自動 + swap | EFI 1G + swap + `/`。swap は RAM と同容量を確保し、ハイバネートに対応します |
 | 手動 | `fdisk` を起動。既存の Windows を残したい場合はこちら |
 
+持ち歩き用（後述）では「自動 + swap」は選べません。休止状態のまま別の PC に挿して起動すると、復帰処理でファイルシステムが壊れるためです。
+
 ファイルシステムは **ext4 / btrfs / xfs** から選べます。btrfs を選ぶと `@`（`/`）、`@home`、`@log`（`/var/log`）、`@cache`（`/var/cache`）のサブボリュームを作成し、`compress=zstd,noatime,space_cache=v2` でマウントします。
+
+### 持ち歩き用（外付け SSD に入れて、いろいろな PC で起動する）
+
+インストール先に外付け USB ディスクを選ぶと「持ち歩き用の構成にしますか？」と尋ねます（既定は「はい」）。
+「はい」にすると、次の点が通常のインストールと変わります。
+
+| 項目 | 持ち歩き用での扱い | 理由 |
+|---|---|---|
+| initramfs | `autodetect` フックを外す | インストールした PC 用のドライバだけに絞ると、別の PC でディスクを見つけられず起動しない |
+| マイクロコード | `intel-ucode` と `amd-ucode` の両方 | 挿す PC の CPU が分からないため |
+| GPU ドライバー | `mesa` + `vulkan-intel` / `vulkan-radeon` / `vulkan-nouveau` + `intel-media-driver` | どのメーカーの GPU でも画面が出るように。`nvidia-open` は nouveau を止めるため入れない |
+| ブートローダー | UEFI の既定の場所（`EFI/BOOT/BOOTX64.EFI`）に置き、UEFI 変数は書き換えない（systemd-boot は `--variables=no`、GRUB は `--removable --no-nvram`） | インストールに使った PC の起動メニューを汚さない。どの PC でも起動メニュー（F12 など）から選べば起動する |
+| 時刻（RTC） | ローカル時刻として扱う | Windows の PC に挿したとき、時計を 9 時間ずらさない |
+| swap | 作らない（zram を使う） | ハイバネートは別の PC で復帰すると壊れる |
+| 共有領域 | exFAT のパーティションを末尾に作れる（サイズは選択・0 で作らない） | Windows / Mac でも「ESCA-SHARE」として開ける。Linux では `/media/share`（ホームの `共有` フォルダ）にマウント |
+
+共有領域の既定サイズはディスクの約 1/4 です（120GB の SSD なら 25GB）。Linux 本体（`/`）には最低 32GB を残します。
+BIOS（レガシー）で起動した Live ISO からインストールした場合は GRUB の BIOS 版になるため、UEFI で起動する PC からは起動できません。UEFI で起動し直してからインストールしてください。
 
 ### デスクトップ環境とディスプレイマネージャー
 
@@ -241,6 +262,8 @@ sudo dd if=out/esca-linux-*.iso of=/dev/sdX bs=4M status=progress oflag=sync
 
 UEFI/BIOS で起動順序を変更する必要があります。完了画面に手順が表示されます。起動中のインストールメディア自体は、選択候補から自動で除外されます。
 
+持ち歩き用で入れた場合は、起動直後に F12 などで Boot Menu を開いて外付けディスクを選べば起動します。それでも起動しないときは、UEFI の設定でセキュアブートを無効にしてください。
+
 ### アイコンが豆腐（□）になる
 
 Nerd Font 系のパッケージが入っていない可能性があります。引き継いだ設定に Nerd Fonts v2 時代の符号位置が残っている場合は、インストーラーが自動で置換しますが、対象は Waybar の `config.jsonc` のみです。
@@ -267,7 +290,7 @@ push のたびに GitHub Actions（`.github/workflows/check.yml`）で次を自�
 |---|---|---|
 | 構文・shellcheck | `bash -n` と shellcheck（警告レベル） | `shellcheck -S warning install.sh build-iso.sh` |
 | 単体テスト | GPU 判定・initramfs 設定・確認画面の幅・パッケージ一覧と事前確認・引数の扱いなど | `bash tests/unit.sh` |
-| ドライランの通しテスト | 回答を自動入力して `--dry-run` を最後まで実行 | `sudo bash tests/dryrun.sh` |
+| ドライランの通しテスト | 回答を自動入力して `--dry-run` を最後まで実行（通常・持ち歩き用の2通り） | `sudo bash tests/dryrun.sh` / `sudo bash tests/dryrun.sh 1 portable`（64GB 以上のディスクが必要） |
 | パッケージ名の定期チェック | 入れる公式パッケージが今の Arch に存在するか（毎週月曜と、`install.sh` の変更時。`packages.yml`） | Arch 上で `pacman -Sy` のあと `bash tests/pkgcheck.sh` |
 | ログイン画面の描画 | SDDM テーマを実際に描画し、表示と操作を確認 | `python3 tests/sddm_render.py --out sddm.png`（要 PySide6） |
 

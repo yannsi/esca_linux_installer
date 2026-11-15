@@ -12,7 +12,10 @@
 #   - 予約されたユーザー名・存在しないパッケージ名を入力時に弾く
 #   - 確認画面・修正メニューが表示される
 #
-# 使い方: sudo bash tests/dryrun.sh [インストール先ディスクの番号（既定 1）]
+# 使い方: sudo bash tests/dryrun.sh [インストール先ディスクの番号（既定 1）] [portable]
+#   2つ目に portable を渡すと「持ち歩き用」の流れを通す（選んだディスクを外付け USB として扱う）。
+#   共有領域（exFAT）の設問まで通すため、ディスクは 64GB 以上を用意すること
+#   （loop デバイスなら truncate -s 128G で作れる。中身は書かれないので実容量は使わない）。
 #   root が必要（install.sh 自体が root を要求するため）。ドライランなので
 #   ディスクには一切書き込まない。候補にディスクが無い環境では、
 #   ESCA_TEST_ALLOW_LOOP=1 と loop デバイスを用意すれば候補に出せる。
@@ -20,6 +23,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISK_NO="${1:-1}"
+MODE="${2:-normal}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -93,23 +97,70 @@ if ! compgen -G "/home/*/.config" > /dev/null && [[ ! -d "${ROOT_DIR}/dotfiles/.
     fi
   done
 fi
+# 持ち歩き用: 外付けの確認・共有領域のサイズが増え、Windows 共存の設問が無くなる
+if [[ "$MODE" == "portable" ]]; then
+  answers=(
+    y                       # 開始しますか
+    "$DISK_NO" y            # ディスク選択・確認
+    ""                      # 持ち歩き用にするか（既定 Yes）
+    1 1                     # パーティション構成・ext4
+    ""                      # 共有領域のサイズ（既定）
+    ""                      # ホスト名（既定 esca）
+    password1 password1     # root パスワード
+    y                       # 一般ユーザーを作成
+    sk password1 password1  # ユーザー名・パスワード
+    y 1 1                   # sudo・通常 sudo・bash
+    n                       # さらに追加しない
+    "${uefi_answer[@]}"     # ブートローダー（UEFI のみ）
+    6 2                     # COSMIC・SDDM
+    3                       # 設定の引き継ぎ: 最後の選択肢（引き継がない）
+    1                       # Wi-Fi: iwd
+    "" "" "" ""             # SSH・LibreOffice・Chrome・yt-fzf（既定 Yes）
+    n                       # ufw
+    ""                      # 追加パッケージなし
+    1                       # インストールを実行
+    YES                     # 最終確認
+  )
+  if ! compgen -G "/home/*/.config" > /dev/null && [[ ! -d "${ROOT_DIR}/dotfiles/.config" ]]; then
+    for i in "${!answers[@]}"; do
+      if [[ "${answers[$i]}" == "3" && "${answers[$((i-1))]}" == "2" && "${answers[$((i-2))]}" == "6" ]]; then answers[i]=2; fi
+    done
+  fi
+fi
 printf '%s\n' "${answers[@]}" > "$WORK/answers.txt"
 
 # パスワード入力（read -s）は端末設定を切り替えるため、少し間を空けて1行ずつ送る
 feed() { while IFS= read -r l; do sleep 0.5; printf '%s\r' "$l"; done < "$WORK/answers.txt"; sleep 10; }
 
 echo "ドライランを実行しています（1分ほどかかります）..."
+force_usb=0
+[[ "$MODE" == "portable" ]] && force_usb=1
 feed | PATH="$WORK/stub:$PATH" TERM=xterm-256color ESCA_TEST_ALLOW_LOOP="${ESCA_TEST_ALLOW_LOOP:-0}" \
+  ESCA_TEST_FORCE_USB="$force_usb" \
   timeout 180 script -qfec "bash '${ROOT_DIR}/install.sh' --dry-run" /dev/null > "$WORK/raw.log" 2>&1 || true
 sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$WORK/raw.log" | tr -d '\r' > "$WORK/out.log"
 
 fail=0
 expect() { if grep -qF -- "$2" "$WORK/out.log"; then echo "  OK   $1"; else echo "  NG   $1"; fail=1; fi; }
 reject() { if grep -qF -- "$2" "$WORK/out.log"; then echo "  NG   $1"; fail=1; else echo "  OK   $1"; fi; }
-expect "予約されたユーザー名を弾く"         "「root」はシステムが使う名前のため使用できません"
-expect "存在しないパッケージ名を弾く"       "公式リポジトリに見つかりません: nosuchpkg"
+if [[ "$MODE" == "portable" ]]; then
+  expect "持ち歩き用を選べる"                 "持ち歩き用の構成でインストールします"
+  expect "swap（ハイバネート）を選ばせない"   "持ち歩き用のため swap（ハイバネート）は使いません"
+  reject "Windows 共存の設問を出さない"       "Windows を残して、起動時に選べるようにしますか"
+  expect "GPU は汎用の構成"                   "汎用（Intel・AMD・NVIDIA どの PC でも動く構成）"
+  expect "共有領域のサイズを尋ねる"           "共有領域: "
+  expect "共有領域パーティションを作る"       "共有領域パーティション作成"
+  expect "共有領域を自動マウントする"         "共有領域の自動マウント設定"
+  expect "持ち歩き用の使い方を案内する"       "持ち歩き用ディスクの使い方"
+  if [[ -d /sys/firmware/efi/efivars ]]; then
+    expect "UEFI 変数を書き換えない"          "UEFI 変数を書き換えない"
+  fi
+else
+  expect "予約されたユーザー名を弾く"         "「root」はシステムが使う名前のため使用できません"
+  expect "存在しないパッケージ名を弾く"       "公式リポジトリに見つかりません: nosuchpkg"
+  expect "修正メニューが出る"                 "修正する項目を選択してください"
+fi
 expect "確認画面が出る"                     "インストール内容の確認"
-expect "修正メニューが出る"                 "修正する項目を選択してください"
 expect "ディスク消去前にパッケージを確認する" "パッケージ名の事前確認（ディスク消去前）"
 expect "最後まで完了する"                   "インストール完了"
 reject "予期しないエラーが出ない"           "予期しないエラーで停止しました"

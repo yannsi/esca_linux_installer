@@ -112,6 +112,13 @@ fi
 declare -A CONFIG=(
   [disk]=""
   [disk_is_external]="no"
+  # 持ち歩き用（いろいろな PC に挿して起動する外付けディスク）の構成にするか。
+  # 外付け USB ディスクを選んだときだけ step_disk で尋ねる（_ask_portable 参照）。
+  [portable]="no"
+  # 持ち歩き用の共有領域（exFAT）のサイズ（GiB）。0 なら作らない。
+  [share_size_gib]="0"
+  # 実際に作った共有領域のパーティション（do_format_and_mount で確定）
+  [share_part]=""
   [hostname]=""
   [timezone]="Asia/Tokyo"
   [locale]="ja_JP.UTF-8"
@@ -1327,7 +1334,10 @@ step_disk() {
   local disk_name="${CONFIG[disk]#/dev/}"
   local disk_sys_link
   disk_sys_link=$(readlink -f "/sys/block/${disk_name}" 2>/dev/null || echo "")
-  if [[ "$disk_sys_link" == *"/usb"* ]]; then
+  # 自動テスト用: ドライランかつ ESCA_TEST_FORCE_USB=1 のときだけ外付け扱いにする
+  # （CI の loop デバイスで持ち歩き用の流れを通すため。ドライランなので実害は無い）
+  if [[ "$disk_sys_link" == *"/usb"* ]] \
+     || [[ "$DRY_RUN" == "yes" && "${ESCA_TEST_FORCE_USB:-0}" == "1" ]]; then
     CONFIG[disk_is_external]="yes"
     print_warn "外付け USB デバイスが選択されました"
   else
@@ -1342,6 +1352,87 @@ step_disk() {
     exit 1
   fi
   print_ok "ディスク: ${CONFIG[disk]}"
+
+  # 持ち歩き用にするかどうか（外付けのときだけ尋ねる）
+  local was_portable="${CONFIG[portable]}"
+  if [[ "${CONFIG[disk_is_external]}" == "yes" ]]; then
+    _ask_portable
+  else
+    CONFIG[portable]="no"
+  fi
+
+  # 【重要】修正メニューからディスクを選び直して持ち歩き用の有無が変わったときは、
+  # それに連動する設定（パーティション構成・GPU・Windows 共存）を決め直す。
+  # 初回（まだパーティション構成を選んでいない）は、この後の各ステップで決まるので何もしない。
+  if [[ -n "${CONFIG[partition_scheme]}" && "$was_portable" != "${CONFIG[portable]}" ]]; then
+    print_warn "持ち歩き用の設定が変わったため、関連する設定を選び直します。"
+    step_partition_scheme
+    _choose_gpu
+    if [[ "${CONFIG[portable]}" == "yes" ]]; then
+      CONFIG[dualboot_windows]="no"
+    fi
+  fi
+}
+
+# 外付けディスクを「持ち歩き用」にするかを尋ねる。
+#
+# 持ち歩き用にすると、どの PC に挿しても起動できるよう次の点を変える:
+#   - initramfs から autodetect を外す（インストールした PC 用のドライバだけに絞らない）
+#   - マイクロコードを Intel / AMD 両方入れる
+#   - GPU ドライバは特定のメーカーに絞らず、Intel / AMD / NVIDIA(nouveau) 全部入れる
+#   - ブートローダーは UEFI の既定の場所（EFI/BOOT/BOOTX64.EFI）に置き、
+#     挿した PC の UEFI 変数（起動メニューの登録）を書き換えない
+#   - RTC をローカル時刻として扱う（Windows の PC に挿したとき時計を狂わせない）
+#   - swap パーティション（ハイバネート）は使わない（別の PC で復帰すると壊れる）
+_ask_portable() {
+  echo ""
+  echo "  外付けディスクには、いろいろな PC に挿して起動できる"
+  echo "  「持ち歩き用」の構成で入れることができます。"
+  echo ""
+  echo "  「はい」にすると次のようになります:"
+  echo "      ・どの PC でも起動できるよう、ドライバーと起動の仕組みを汎用にする"
+  echo "      ・挿した PC の起動メニュー（UEFI の登録）を書き換えない"
+  echo "      ・時刻の扱いを Windows に合わせる（挿した PC の時計を狂わせない）"
+  echo "      ・Windows / Mac ともファイルをやり取りできる共有領域（exFAT）を作れる"
+  echo ""
+  echo "  この PC 専用の起動ディスクとして使う場合は「いいえ」を選んでください。"
+  echo ""
+  if confirm_yes "持ち歩き用の構成にしますか？"; then
+    CONFIG[portable]="yes"
+    print_ok "持ち歩き用の構成でインストールします"
+  else
+    CONFIG[portable]="no"
+    CONFIG[share_size_gib]="0"
+    print_ok "この PC 専用の構成でインストールします"
+  fi
+}
+
+# ディスクの容量（GiB・切り捨て）。読めなければ 0。
+_disk_size_gib() {
+  local bytes
+  bytes=$(lsblk -bdno SIZE "$1" 2>/dev/null | head -n1 | tr -dc '0-9') || true
+  [[ -n "$bytes" ]] || { echo 0; return; }
+  echo $(( bytes / 1073741824 ))
+}
+
+# root に最低限残す容量（GiB）。デスクトップ環境とアプリを入れて、
+# 更新でパッケージキャッシュが溜まっても困らない目安。
+PORTABLE_MIN_ROOT_GIB=32
+
+# 共有領域の「おすすめサイズ」と「上限」を "既定|上限" で返す（GiB）。
+# 引数1: ディスク容量（GiB）
+# 既定はディスクの約 1/4（5GB 単位で切り捨て）。ただし root が
+# PORTABLE_MIN_ROOT_GIB を下回らない範囲に収める。小さすぎるディスクでは "0|0"。
+_share_size_suggest() {
+  local disk_gib="$1" max def
+  # EFI(1G) と root の最低容量を引いた残りが上限
+  max=$(( disk_gib - 1 - PORTABLE_MIN_ROOT_GIB ))
+  (( max < 1 )) && { echo "0|0"; return; }
+  def=$(( disk_gib / 4 ))
+  def=$(( def - def % 5 ))
+  (( def > max )) && def=$max
+  (( def < 0 )) && def=0
+  echo "${def}|${max}"
 }
 
 # ============================================
@@ -1359,10 +1450,19 @@ step_partition_scheme() {
   fi
 
   local scheme
-  scheme=$(select_from_list "パーティション構成を選択:" \
-    "自動（推奨） - EFI 1G + / のみ（swap なし・zram 推奨）" \
-    "自動 - EFI 1G + swap (RAM同容量) + /（ハイバネート使用時）" \
-    "手動（fdisk を起動）")
+  if [[ "${CONFIG[portable]}" == "yes" ]]; then
+    # 持ち歩き用では swap（ハイバネート）を選ばせない。
+    # 休止した状態で別の PC に挿して起動すると、復帰処理でファイルシステムが壊れる。
+    print_ok "持ち歩き用のため swap（ハイバネート）は使いません（メモリ不足は zram で補います）"
+    scheme=$(select_from_list "パーティション構成を選択:" \
+      "自動（推奨） - EFI 1G + / のみ（swap なし・zram 推奨）" \
+      "手動（fdisk を起動）")
+  else
+    scheme=$(select_from_list "パーティション構成を選択:" \
+      "自動（推奨） - EFI 1G + / のみ（swap なし・zram 推奨）" \
+      "自動 - EFI 1G + swap (RAM同容量) + /（ハイバネート使用時）" \
+      "手動（fdisk を起動）")
+  fi
 
   case "$scheme" in
     "自動（推奨） - EFI 1G + / のみ（swap なし・zram 推奨）") CONFIG[partition_scheme]="auto_noswap" ;;
@@ -1386,6 +1486,48 @@ step_partition_scheme() {
       "xfs    - 大容量・高性能（サーバー・上級者向け）")         CONFIG[fs_type]="xfs" ;;
     esac
     print_ok "ファイルシステム: ${CONFIG[fs_type]}"
+  fi
+
+  _ask_share_size
+}
+
+# 持ち歩き用の共有領域（exFAT）のサイズを尋ねる。
+# 持ち歩き用かつ自動パーティションのときだけ。それ以外は 0（作らない）にする。
+_ask_share_size() {
+  if [[ "${CONFIG[portable]}" != "yes" || "${CONFIG[partition_scheme]}" == "manual" ]]; then
+    CONFIG[share_size_gib]="0"
+    return 0
+  fi
+
+  local disk_gib suggest def max
+  disk_gib=$(_disk_size_gib "${CONFIG[disk]}")
+  suggest=$(_share_size_suggest "$disk_gib")
+  def="${suggest%%|*}"; max="${suggest##*|}"
+  if [[ "$max" -lt 1 ]]; then
+    CONFIG[share_size_gib]="0"
+    print_warn "ディスクが小さいため、共有領域（exFAT）は作りません。"
+    return 0
+  fi
+
+  echo ""
+  echo "  共有領域（exFAT）は、Windows や Mac に挿したときにも開ける場所です。"
+  echo "  Linux からは「~/共有」フォルダとして使えます。"
+  echo "  残りはすべて Linux 本体（/）になります。作らない場合は 0 を入力してください。"
+  echo -e "  ${GRAY}（ディスク全体: 約 ${disk_gib}GB / 共有領域の上限: ${max}GB）${RESET}"
+  local size
+  while true; do
+    size=$(ask "共有領域のサイズ（GB）" "$def")
+    if [[ "$size" =~ ^[0-9]+$ ]] && [[ "$((10#$size))" -le "$max" ]]; then
+      size=$((10#$size))
+      break
+    fi
+    print_err "0〜${max} の数字を入力してください。"
+  done
+  CONFIG[share_size_gib]="$size"
+  if [[ "$size" -gt 0 ]]; then
+    print_ok "共有領域: ${size}GB（exFAT）/ Linux 本体: 残り約 $(( disk_gib - 1 - size ))GB"
+  else
+    print_ok "共有領域: 作らない"
   fi
 }
 
@@ -1498,6 +1640,15 @@ step_system() {
   # 利用者が「はい＝Windows が消えないように取り計らってくれる」と
   # 誤解すると、そのままディスク全体を消してしまう。
   # 設問文と説明で、守られないことを先に明示すること。
+  #
+  # 持ち歩き用の外付けディスクでは尋ねない。Windows と同じディスクに入れる構成ではなく、
+  # 時刻の扱いは持ち歩き用の設定として別に Windows に合わせている（do_chroot_config）。
+  if [[ "${CONFIG[portable]}" == "yes" ]]; then
+    CONFIG[dualboot_windows]="no"
+    print_ok "時刻: Windows に合わせる（持ち歩き用・挿した PC の時計を狂わせないため）"
+    _choose_gpu
+    return
+  fi
   echo ""
   echo "  Windows がインストールされた PC に、Windows を残したまま"
   echo "  Esca Linux を追加し、起動時にどちらを使うか選べるようにする設定です。"
@@ -1525,8 +1676,24 @@ step_system() {
     print_ok "RTC モード: UTC（推奨）"
   fi
 
-  # --- GPU ドライバーの選択 ---
+  _choose_gpu
+}
+
+# --- GPU ドライバーの選択 ---
+# step_system と、持ち歩き用の有無が変わったとき（step_disk）から呼ぶ。
+_choose_gpu() {
   echo ""
+
+  # 持ち歩き用: 挿す PC ごとに GPU が違うため、メーカーを絞らず全部入れる
+  # （中身は _collect_pacstrap_pkgs の portable を参照）。
+  # NVIDIA のプロプライエタリ版（nvidia-open）は入れない。入れると nouveau を
+  # 無効化するため、NVIDIA 以外の PC では問題なくても、古い NVIDIA の PC で画面が出なくなる。
+  if [[ "${CONFIG[portable]}" == "yes" ]]; then
+    CONFIG[gpu_driver]="portable"
+    CONFIG[gpu_igpu]=""
+    print_ok "GPU ドライバー: $(_label gpu_driver)"
+    return
+  fi
 
   # GPU を自動検出して推奨を提示（判定本体は _detect_gpu。テストから直接呼べるよう分けている）
   local detected_gpu="" recommended="" gpu_result
@@ -1762,8 +1929,16 @@ step_bootloader() {
     print_warn "ファームウェア: BIOS（レガシー）検出"
     print_warn "systemd-boot は UEFI 専用のため、GRUB を使用します。"
     CONFIG[bootloader]="grub"
+    if [[ "${CONFIG[portable]}" == "yes" ]]; then
+      print_warn "持ち歩き用ですが、この PC が BIOS（レガシー）で起動しているため、"
+      print_warn "UEFI で起動する PC（最近の PC のほとんど）からは起動できません。"
+      print_warn "UEFI で起動し直してからインストールするのがおすすめです。"
+    fi
   fi
 
+  if [[ "${CONFIG[portable]}" == "yes" && "$boot_mode" == "uefi" ]]; then
+    print_ok "持ち歩き用: UEFI の既定の場所に置き、挿した PC の起動メニューは書き換えません"
+  fi
   print_ok "ブートローダー: ${CONFIG[bootloader]}"
 }
 
@@ -2288,6 +2463,7 @@ _label() {
     gpu_driver:amdgpu)            echo "AMD" ;;
     gpu_driver:intel)             echo "Intel" ;;
     gpu_driver:virtual)           echo "仮想環境用" ;;
+    gpu_driver:portable)          echo "汎用（Intel・AMD・NVIDIA どの PC でも動く構成）" ;;
     gpu_driver:none)              echo "導入しない" ;;
     wifi_backend:iwd)             echo "iwd" ;;
     wifi_backend:wpa_supplicant)  echo "wpa_supplicant" ;;
@@ -2383,8 +2559,14 @@ show_summary() {
   local part
   part=$(_label partition_scheme)
   [[ "${CONFIG[partition_scheme]}" != "manual" ]] && part+=" / ${CONFIG[fs_type]}"
+  if [[ "${CONFIG[share_size_gib]:-0}" -gt 0 ]]; then
+    part+=" + 共有 ${CONFIG[share_size_gib]}GB（exFAT）"
+  fi
   _kv "パーティション" "$part"
   _kv "起動方式" "$(_label boot_mode) / $(_label bootloader)"
+  if [[ "${CONFIG[portable]:-no}" == "yes" ]]; then
+    _kv "持ち歩き用" "する（どの PC でも起動・時刻は Windows に合わせる）"
+  fi
   if [[ "${CONFIG[dualboot_windows]:-no}" == "yes" ]]; then
     _kv "Windows 共存" "する（起動時に選択・時刻を Windows に合わせる）"
   fi
@@ -2400,6 +2582,12 @@ show_summary() {
 # ============================================
 # 実行: パーティション
 # ============================================
+
+# 共有領域のパーティション番号（root の次）。
+# 自動パーティションでは root が 2番（swap ありなら 3番）なので、その次になる。
+_share_part_number() {
+  if [[ "${CONFIG[partition_scheme]}" == "auto_swap" ]]; then echo 4; else echo 3; fi
+}
 
 do_partition() {
   local disk="${CONFIG[disk]}"
@@ -2449,6 +2637,12 @@ do_partition() {
     true
   ' _ "$disk"
 
+  # 持ち歩き用の共有領域（exFAT）はディスクの末尾に置き、root は残り全部から
+  # その分を引いた大きさにする（sgdisk の終端 "-NG" は「末尾から N GiB 手前まで」）。
+  local share_gib="${CONFIG[share_size_gib]:-0}"
+  local root_end="0"
+  [[ "$share_gib" -gt 0 ]] && root_end="-${share_gib}G"
+
   # GPT で全消去（--zap-all は GPT/MBR 双方を破棄し、以降の --new で新規GPTが作られる）
   run_cmd "GPT テーブル初期化" sgdisk --zap-all "$disk"
 
@@ -2467,11 +2661,11 @@ do_partition() {
         sgdisk --new=2:0:+"${swap_size}" --typecode=2:8200 --change-name=2:swap "$disk"
       # root (残り全部)
       run_cmd "root パーティション作成" \
-        sgdisk --new=3:0:0 --typecode=3:8300 --change-name=3:root "$disk"
+        sgdisk --new=3:0:"${root_end}" --typecode=3:8300 --change-name=3:root "$disk"
     else
       # root (残り全部)
       run_cmd "root パーティション作成" \
-        sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:root "$disk"
+        sgdisk --new=2:0:"${root_end}" --typecode=2:8300 --change-name=2:root "$disk"
     fi
   else
     # BIOS: BIOS Boot (1MB) + swap + root
@@ -2482,11 +2676,20 @@ do_partition() {
       run_cmd "swap パーティション作成 (${swap_size})" \
         sgdisk --new=2:0:+"${swap_size}" --typecode=2:8200 --change-name=2:swap "$disk"
       run_cmd "root パーティション作成" \
-        sgdisk --new=3:0:0 --typecode=3:8300 --change-name=3:root "$disk"
+        sgdisk --new=3:0:"${root_end}" --typecode=3:8300 --change-name=3:root "$disk"
     else
       run_cmd "root パーティション作成" \
-        sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:root "$disk"
+        sgdisk --new=2:0:"${root_end}" --typecode=2:8300 --change-name=2:root "$disk"
     fi
+  fi
+
+  # 共有領域（exFAT）。種類は「Microsoft basic data」にする（Windows / Mac が
+  # ドライブとして認識する種類。Linux 用の 8300 だと Windows に表示されない）。
+  if [[ "$share_gib" -gt 0 ]]; then
+    local share_no
+    share_no=$(_share_part_number)
+    run_cmd "共有領域パーティション作成 (${share_gib}G・exFAT 用)" \
+      sgdisk --new="${share_no}":0:0 --typecode="${share_no}":0700 --change-name="${share_no}":ESCA-SHARE "$disk"
   fi
 
   # カーネルにパーティションテーブル再読込を通知
@@ -2800,6 +3003,17 @@ do_format_and_mount() {
       run_cmd "swap 有効化" swapon "$swap_part"
     fi
   fi
+
+  # 持ち歩き用の共有領域（exFAT）。インストール中はマウントしない
+  # （genfstab に拾わせず、do_fstab で専用の行を書くため）。
+  CONFIG[share_part]=""
+  if [[ "${CONFIG[share_size_gib]:-0}" -gt 0 ]]; then
+    local share_part
+    share_part=$(part_suffix "$disk" "$(_share_part_number)")
+    # ラベルは 11 文字まで（exFAT の上限）。Windows / Mac ではこの名前で表示される。
+    run_cmd "共有領域フォーマット (exFAT)" mkfs.exfat -L ESCA-SHARE "$share_part"
+    CONFIG[share_part]="$share_part"
+  fi
 }
 
 # ============================================
@@ -2875,6 +3089,10 @@ step_network() {
     "なし（有線のみ・後から設定）")                          CONFIG[wifi_backend]="none" ;;
   esac
   print_ok "Wi-Fi: $(_label wifi_backend)"
+  if [[ "${CONFIG[portable]}" == "yes" && "${CONFIG[wifi_backend]}" == "none" ]]; then
+    print_warn "持ち歩き用では、挿した先の PC で Wi-Fi を使うことが多いため iwd がおすすめです。"
+    print_warn "（修正メニューの「ネットワーク（Wi-Fi）」から変更できます）"
+  fi
 
   # systemd-resolved: 推奨のため固定で有効化
   # （DNS キャッシュ・DNSSEC。NetworkManager と自動連携する）
@@ -2959,9 +3177,10 @@ do_mirrorlist() {
 # initramfs のドロップイン（/etc/mkinitcpio.conf.d/10-esca.conf）の本文を出力する。
 # 追加する設定が無ければ何も出力しない。テストから直接呼べるよう分けている。
 # 引数1: ファイルシステム / 引数2: GPU ドライバー / 引数3: swap パーティション（無ければ空）
+# 引数4: 持ち歩き用なら yes（省略時は no）
 _initramfs_dropin_body() {
-  local fs="$1" gpu="$2" swap="$3"
-  local body="" drop_kms="no" add_resume="no"
+  local fs="$1" gpu="$2" swap="$3" portable="${4:-no}"
+  local body="" drop_kms="no" add_resume="no" drop_autodetect="no"
 
   # btrfs ルート
   [[ "$fs" == "btrfs" ]] && body+="MODULES+=(btrfs)"$'\n'
@@ -2979,10 +3198,19 @@ _initramfs_dropin_body() {
   # systemd 自身がカーネルの resume= を見て復帰を処理するため、追加しない。
   [[ -n "$swap" ]] && add_resume="yes"
 
-  if [[ "$drop_kms" == "yes" || "$add_resume" == "yes" ]]; then
+  # 持ち歩き用: autodetect フックを外す。
+  # autodetect は「インストールした PC で今使っているドライバ」だけを initramfs に
+  # 入れるため、別の PC（ストレージや USB コントローラが違う）に挿すと
+  # ルートのディスクを見つけられず起動できない。外すと全ドライバが入る
+  # （initramfs は大きくなるが、EFI パーティションは 1GB あるので収まる）。
+  # 同じ理由で microcode フックも Intel / AMD 両方を同梱するようになる。
+  [[ "$portable" == "yes" ]] && drop_autodetect="yes"
+
+  if [[ "$drop_kms" == "yes" || "$add_resume" == "yes" || "$drop_autodetect" == "yes" ]]; then
     body+='_esca_hooks=()'$'\n'
     body+='for _esca_h in "${HOOKS[@]}"; do'$'\n'
     [[ "$drop_kms" == "yes" ]] && body+='  [[ "$_esca_h" == kms ]] && continue'$'\n'
+    [[ "$drop_autodetect" == "yes" ]] && body+='  [[ "$_esca_h" == autodetect ]] && continue'$'\n'
     [[ "$add_resume" == "yes" ]] && body+='  if [[ "$_esca_h" == filesystems && " ${HOOKS[*]} " != *" systemd "* && " ${HOOKS[*]} " != *" resume "* ]]; then _esca_hooks+=(resume); fi'$'\n'
     body+='  _esca_hooks+=("$_esca_h")'$'\n'
     body+='done'$'\n'
@@ -3015,7 +3243,7 @@ _initramfs_dropin_body() {
 write_initramfs_config() {
   local dropin="/etc/mkinitcpio.conf.d/10-esca.conf"
   local body
-  body=$(_initramfs_dropin_body "${CONFIG[fs_type]}" "${CONFIG[gpu_driver]}" "${CONFIG[swap_part]}")
+  body=$(_initramfs_dropin_body "${CONFIG[fs_type]}" "${CONFIG[gpu_driver]}" "${CONFIG[swap_part]}" "${CONFIG[portable]}")
 
   run_cmd "キーマップ・コンソールフォント設定 (vconsole.conf)" \
     bash -c "mkdir -p /mnt/etc && printf 'KEYMAP=%s\nFONT=ter-116n\n' '${CONFIG[keymap]}' > /mnt/etc/vconsole.conf"
@@ -3096,7 +3324,13 @@ _collect_pacstrap_pkgs() {
 
   # マイクロコード
   local cpu_vendor="${CONFIG[cpu_vendor]}"
-  if [[ "$cpu_vendor" == "GenuineIntel" ]]; then
+  if [[ "${CONFIG[portable]:-no}" == "yes" ]]; then
+    # 持ち歩き用: 挿す PC の CPU が分からないので両方入れる。
+    # initramfs の autodetect を外しているので、microcode フックが両方を同梱し、
+    # 起動した CPU に合うほうだけが使われる。
+    _ps+=(intel-ucode amd-ucode)
+    "$_say" "Intel / AMD 両方のマイクロコードを追加（持ち歩き用）"
+  elif [[ "$cpu_vendor" == "GenuineIntel" ]]; then
     _ps+=(intel-ucode)
     "$_say" "Intel マイクロコードを追加"
   elif [[ "$cpu_vendor" == "AuthenticAMD" ]]; then
@@ -3216,6 +3450,15 @@ _collect_pacstrap_pkgs() {
     # （2026-10 の定期チェックで検出）。仮想 GPU（VMware SVGA / virtio / QXL）は
     # Xorg 標準の modesetting と Mesa で動くので、mesa だけでよい（coffee 版と同じ）。
     virtual) _ps+=(mesa) ;;
+    # 持ち歩き用: どの PC に挿しても画面が出て、動画のハードウェアデコードも効くよう、
+    # Intel / AMD / NVIDIA(nouveau) の Vulkan と Intel の VA-API を全部入れる。
+    # 2D の表示は Xorg / Wayland とも modesetting と mesa で動くので、
+    # xf86-video-* は入れない（入れるとメーカーが合わない PC で Xorg が迷う）。
+    # AMD の VA-API（radeonsi）は mesa に含まれる。
+    portable)
+      _ps+=(mesa vulkan-intel vulkan-radeon vulkan-nouveau intel-media-driver)
+      "$_say" "GPU: Intel / AMD / NVIDIA(nouveau) 全対応のドライバー一式（持ち歩き用）"
+      ;;
   esac
 
   # ハイブリッド構成（NVIDIA + 内蔵 GPU）: 内蔵側のドライバも入れる（_detect_igpu 参照）
@@ -3305,6 +3548,45 @@ do_pacstrap() {
 
   run_cmd_retry "pacstrap 実行（時間がかかります）" pacstrap /mnt "${pkgs[@]}"
 }
+# 共有領域（exFAT）の fstab の行を出力する。テストから直接呼べるよう分けている。
+# 引数1: 共有領域の UUID
+#
+# 【重要】uid / gid は 1000（最初に作る一般ユーザー）にする。exFAT には
+# 持ち主の情報が無く、指定しないと root の物になって一般ユーザーが書き込めない。
+# useradd -m は同名のグループも作るので、最初のユーザーは uid / gid とも 1000 になる。
+# 【重要】nofail を付けること。共有領域が壊れていたり消されていたりしても、
+# Linux 本体の起動は止めない（付けないと緊急モードで止まる）。
+_share_fstab_line() {
+  printf 'UUID=%s  %s  exfat  rw,noatime,nofail,uid=1000,gid=1000,fmask=0133,dmask=0022  0 0\n' \
+    "$1" "$SHARE_MOUNTPOINT"
+}
+SHARE_MOUNTPOINT="/media/share"
+
+# 持ち歩き用の共有領域を起動時にマウントする設定と、ホームの「共有」フォルダを作る。
+# 共有領域が無ければ何もしない。
+_write_share_mount() {
+  [[ -n "${CONFIG[share_part]:-}" ]] || return 0
+  local uuid line
+  if [[ "${CONFIG[dry_run]}" == "yes" ]]; then
+    uuid="DRY-RUN-SHARE-UUID"
+  else
+    uuid=$(blkid -s UUID -o value "${CONFIG[share_part]}" || true)
+    if [[ -z "$uuid" ]]; then
+      print_warn "共有領域の UUID を取得できなかったため、自動マウントの設定を省きます。"
+      _add_notice "共有領域（${CONFIG[share_part]}）の自動マウント設定を省きました。必要なら /etc/fstab に追記してください。"
+      return 0
+    fi
+  fi
+  line=$(_share_fstab_line "$uuid")
+  run_cmd "共有領域の自動マウント設定 (${SHARE_MOUNTPOINT})" bash -c '
+    printf "\n# 共有領域（exFAT・Windows / Mac とやり取りする場所）\n%s\n" "$1" >> /mnt/etc/fstab
+    mkdir -p "/mnt$2"
+  ' _ "$line" "$SHARE_MOUNTPOINT"
+  # ホームから辿れるようにする。skel に置けば、この後 useradd -m で作るユーザーに配られる。
+  # （ドライランでも生成物を確認できるよう、SKEL_ROOT には実際に書く）
+  mkdir -p "$SKEL_ROOT" && ln -sfn "$SHARE_MOUNTPOINT" "${SKEL_ROOT}/共有"
+}
+
 do_fstab() {
   print_step "fstab 生成"
   run_cmd "fstab 生成" bash -c "genfstab -U /mnt > /mnt/etc/fstab"
@@ -3314,6 +3596,7 @@ do_fstab() {
   run_cmd "ESP を root 専用に設定" sed -i -E \
     '/^[^#[:space:]]+[[:space:]]+\/boot[[:space:]]+vfat[[:space:]]/ { s/fmask=[0-7]+/fmask=0077/; s/dmask=[0-7]+/dmask=0077/ }' \
     /mnt/etc/fstab
+  _write_share_mount
   if [[ -f /mnt/etc/fstab ]]; then
     print_ok "生成内容:"
     sed 's/^/    /' /mnt/etc/fstab
@@ -3382,7 +3665,10 @@ do_chroot_config() {
   run_cmd "タイムゾーン設定" \
     arch-chroot /mnt ln -sf "/usr/share/zoneinfo/${CONFIG[timezone]}" /etc/localtime
 
-  if [[ "${CONFIG[dualboot_windows]:-no}" == "yes" ]]; then
+  # 持ち歩き用も RTC をローカル時刻にする。日本で挿す PC の大半は Windows（RTC = 日本時間）で、
+  # UTC のままだと起動直後の時計が 9 時間ずれるうえ、NTP で合わせた時刻を UTC で
+  # RTC に書き戻すため、その PC の Windows 側の時計を 9 時間狂わせてしまう。
+  if [[ "${CONFIG[dualboot_windows]:-no}" == "yes" || "${CONFIG[portable]:-no}" == "yes" ]]; then
     # Windows と共存: RTC をローカル時刻として扱う
     # timedatectl は chroot 内で動かないため /etc/adjtime を直接書く
     # ※ hwclock は RTC の無い一部の VM で失敗するため非致命扱い
@@ -4082,7 +4368,23 @@ do_bootloader() {
 
   if [[ "${CONFIG[bootloader]}" == "systemd-boot" ]]; then
     # bootctl インストール
-    run_cmd "bootctl インストール" arch-chroot /mnt bootctl install
+    if [[ "${CONFIG[portable]:-no}" == "yes" ]]; then
+      # 持ち歩き用: UEFI 変数（今インストールに使っている PC の起動メニュー）に登録しない。
+      # bootctl install は UEFI の既定の場所（EFI/BOOT/BOOTX64.EFI）にも必ず置くので、
+      # 登録が無くても、どの PC でも起動メニュー（F12 など）から外付けディスクを選べば起動する。
+      # 【重要】systemd 258 で --no-variables は --variables=no に置き換わった。
+      # 使える方を確かめてから渡す（古い方だけを書くと、将来削除されたときに止まる）。
+      run_cmd "bootctl インストール（持ち歩き用・UEFI 変数を書き換えない）" \
+        arch-chroot /mnt bash -c '
+          if bootctl --help 2>/dev/null | grep -q -- "--variables="; then
+            bootctl install --variables=no
+          else
+            bootctl install --no-variables
+          fi
+        '
+    else
+      run_cmd "bootctl インストール" arch-chroot /mnt bootctl install
+    fi
 
     # ローダー設定
     run_cmd "loader.conf 作成" bash -c "cat > /mnt/boot/loader/loader.conf << EOF
@@ -4156,7 +4458,16 @@ EOF"
 
   else
     # GRUB
-    if [[ "${CONFIG[boot_mode]}" == "uefi" ]]; then
+    if [[ "${CONFIG[boot_mode]}" == "uefi" && "${CONFIG[portable]:-no}" == "yes" ]]; then
+      # 持ち歩き用: UEFI の既定の場所（EFI/BOOT/BOOTX64.EFI）に置き（--removable）、
+      # インストールに使っている PC の UEFI 変数は書き換えない（--no-nvram）。
+      run_cmd "GRUB インストール (UEFI・持ち歩き用)" \
+        arch-chroot /mnt grub-install \
+          --target=x86_64-efi \
+          --efi-directory=/boot \
+          --removable \
+          --no-nvram
+    elif [[ "${CONFIG[boot_mode]}" == "uefi" ]]; then
       run_cmd "GRUB インストール (UEFI)" \
         arch-chroot /mnt grub-install \
           --target=x86_64-efi \
@@ -7924,6 +8235,11 @@ run_install() {
           pacman -S --noconfirm xfsprogs || { print_err "xfsprogs のインストールに失敗しました。"; exit 1; }
         fi ;;
     esac
+    # 持ち歩き用の共有領域（exFAT）を作るとき
+    if [[ "${CONFIG[share_size_gib]:-0}" -gt 0 ]] && ! command -v mkfs.exfat &>/dev/null; then
+      print_warn "exfatprogs をインストールします..."
+      pacman -S --noconfirm exfatprogs || { print_err "exfatprogs のインストールに失敗しました。"; exit 1; }
+    fi
   fi
 
   if [[ "${CONFIG[dry_run]}" != "yes" ]]; then
@@ -8009,8 +8325,25 @@ run_install() {
     echo -e "  一度ログアウトして再ログインしてください。"
   fi
 
+  # 持ち歩き用は「どの PC でも起動メニューから選ぶ」使い方なので、案内を分ける
+  if [[ "${CONFIG[portable]:-no}" == "yes" ]]; then
+    echo ""
+    echo -e "${YELLOW}${BOLD}  ── 持ち歩き用ディスクの使い方 ──${RESET}"
+    echo -e "  PC に挿して電源を入れ、起動直後に ${BOLD}F12${RESET}（メーカーにより F8 / F10 / F11 / Esc）を"
+    echo -e "  押して Boot Menu を開き、この外付けディスクを選んでください。"
+    echo -e "  PC 側の設定（起動順序）は変えなくても使えます。\n"
+    echo -e "  ${BOLD}起動しないときに確かめること:${RESET}"
+    echo -e "    ・UEFI の設定で ${BOLD}セキュアブート（Secure Boot）${RESET} を無効にする"
+    echo -e "    ・USB からの起動が無効になっていないか確かめる"
+    if [[ "${CONFIG[share_size_gib]:-0}" -gt 0 ]]; then
+      echo ""
+      echo -e "  共有領域（${CONFIG[share_size_gib]}GB・ESCA-SHARE）は、Linux では ${BOLD}~/共有${RESET} フォルダ、"
+      echo -e "  Windows / Mac では「ESCA-SHARE」という名前のドライブとして開けます。"
+    fi
+    echo ""
+    echo -e "  ${GRAY}取り外すときは、必ず電源を切ってから抜いてください（起動中に抜くと壊れます）。${RESET}"
   # 外付けディスクへのインストール時は起動方法を案内
-  if [[ "${CONFIG[disk_is_external]:-no}" == "yes" ]]; then
+  elif [[ "${CONFIG[disk_is_external]:-no}" == "yes" ]]; then
     echo ""
     echo -e "${YELLOW}${BOLD}  ── 外付けディスクからの起動について ──${RESET}"
     echo -e "  外付け SSD/HDD からブートするには、UEFI/BIOS で"
