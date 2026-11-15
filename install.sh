@@ -1511,7 +1511,8 @@ _ask_share_size() {
 
   echo ""
   echo "  共有領域（exFAT）は、Windows や Mac に挿したときにも開ける場所です。"
-  echo "  Linux からは「~/共有」フォルダとして使えます。"
+  echo "  Linux からは「~/共有」フォルダとして使えます"
+  echo "  （ファイルマネージャーのサイドバーに出る「ESCA-SHARE」も同じ場所です）。"
   echo "  残りはすべて Linux 本体（/）になります。作らない場合は 0 を入力してください。"
   echo -e "  ${GRAY}（ディスク全体: 約 ${disk_gib}GB / 共有領域の上限: ${max}GB）${RESET}"
   local size
@@ -8337,7 +8338,8 @@ run_install() {
     echo -e "    ・USB からの起動が無効になっていないか確かめる"
     if [[ "${CONFIG[share_size_gib]:-0}" -gt 0 ]]; then
       echo ""
-      echo -e "  共有領域（${CONFIG[share_size_gib]}GB・ESCA-SHARE）は、Linux では ${BOLD}~/共有${RESET} フォルダ、"
+      echo -e "  共有領域（${CONFIG[share_size_gib]}GB）は、Linux では ${BOLD}~/共有${RESET} フォルダ"
+      echo -e "  （ファイルマネージャーのサイドバーに出る「ESCA-SHARE」も同じ場所）、"
       echo -e "  Windows / Mac では「ESCA-SHARE」という名前のドライブとして開けます。"
     fi
     echo ""
