@@ -50,10 +50,11 @@ jobs:
         run: |
           truncate -s 20G /tmp/esca-test-disk.img
           sudo losetup -f --show /tmp/esca-test-disk.img
+      # 【重要】sudo -E は使わないこと。ランナーの sudo が -E を無視するようになり
+      # （"preserving the entire environment is not supported"）、変数が渡らず
+      # loop デバイスが候補に出なくなった。env で明示して渡す。
       - name: ドライラン
-        env:
-          ESCA_TEST_ALLOW_LOOP: "1"
-        run: sudo -E bash tests/dryrun.sh 1
+        run: sudo env ESCA_TEST_ALLOW_LOOP=1 bash tests/dryrun.sh 1
 
   dryrun-portable:
     name: ドライランの通しテスト（持ち歩き用）
@@ -66,9 +67,7 @@ jobs:
           truncate -s 128G /tmp/esca-test-disk.img
           sudo losetup -f --show /tmp/esca-test-disk.img
       - name: ドライラン（持ち歩き用）
-        env:
-          ESCA_TEST_ALLOW_LOOP: "1"
-        run: sudo -E bash tests/dryrun.sh 1 portable
+        run: sudo env ESCA_TEST_ALLOW_LOOP=1 bash tests/dryrun.sh 1 portable
 
   sddm:
     name: ログイン画面（SDDM テーマ）の描画
