@@ -75,7 +75,7 @@ for pair in partition_scheme:auto_noswap partition_scheme:auto_swap partition_sc
             boot_mode:uefi boot_mode:bios \
             desktop:none desktop:kde desktop:gnome desktop:xfce desktop:budgie desktop:cosmic desktop:hyprland desktop:niri \
             dm:sddm dm:gdm dm:lightdm dm:cosmic-greeter dm:greetd dm:none \
-            gpu_driver:nvidia gpu_driver:nouveau gpu_driver:amdgpu gpu_driver:intel gpu_driver:virtual gpu_driver:none \
+            gpu_driver:nvidia gpu_driver:nouveau gpu_driver:amdgpu gpu_driver:intel gpu_driver:virtual gpu_driver:none gpu_driver:portable \
             wifi_backend:none config_source:host config_source:git config_source:none \
             kde_apps:minimal kde_apps:standard kde_apps:full; do
   kind="${pair%%:*}"; val="${pair#*:}"
@@ -102,6 +102,37 @@ body="$(_initramfs_dropin_body ext4 intel /dev/sda2)"
 eq "resume は二重に追加しない" "$(apply "${udev_hooks/filesystems/resume filesystems}")" \
   "MODULES=|HOOKS=base udev autodetect microcode modconf kms keyboard keymap consolefont block resume filesystems fsck"
 
+# 持ち歩き用: autodetect を外さないと、別の PC ではルートのディスクを見つけられず起動できない
+body="$(_initramfs_dropin_body ext4 portable '' yes)"
+eq "持ち歩き用は autodetect を外す（systemd 型）" "$(apply "$sd_hooks")" \
+  "MODULES=|HOOKS=base systemd microcode modconf kms keyboard sd-vconsole block filesystems fsck"
+eq "持ち歩き用は autodetect を外す（従来型）" "$(apply "$udev_hooks")" \
+  "MODULES=|HOOKS=base udev microcode modconf kms keyboard keymap consolefont block filesystems fsck"
+eq "持ち歩き用でなければ autodetect は残す（ドロップインを作らない）" "$(_initramfs_dropin_body ext4 intel '' no)" ""
+
+# --------------------------------------------
+section "持ち歩き用 (portable)"
+_has() { [[ " $1 " == *" $2 "* ]]; }
+eq "共有領域: 120GB の SSD（約111GiB）は 25GB をすすめる"  "$(_share_size_suggest 111)" "25|78"
+eq "共有領域: 64GiB は 15GB"                              "$(_share_size_suggest 64)" "15|31"
+eq "共有領域: root が 32GiB を切らない範囲に収める"        "$(_share_size_suggest 40)" "7|7"
+eq "共有領域: 小さすぎるディスクでは作らない"              "$(_share_size_suggest 30)" "0|0"
+eq "共有領域の番号: swap なしは 3番"   "$(CONFIG[partition_scheme]=auto_noswap; _share_part_number)" "3"
+eq "共有領域の番号: swap ありは 4番"   "$(CONFIG[partition_scheme]=auto_swap; _share_part_number)" "4"
+_fl=$(_share_fstab_line ABCD-1234)
+if [[ "$_fl" == "UUID=ABCD-1234  /media/share  exfat  "*nofail* ]]; then ok "共有領域の fstab は nofail 付き（壊れても起動は止めない）"; else ng "共有領域の fstab は nofail 付き" "$_fl"; fi
+if [[ "$_fl" == *uid=1000,gid=1000* ]]; then ok "共有領域は最初のユーザーが書き込める"; else ng "共有領域は最初のユーザーが書き込める" "$_fl"; fi
+_pp=$(CONFIG[portable]=yes; CONFIG[gpu_driver]=portable; CONFIG[cpu_vendor]=GenuineIntel; _l=(); _collect_pacstrap_pkgs _l quiet; echo "${_l[*]}")
+if _has "$_pp" intel-ucode && _has "$_pp" amd-ucode; then ok "持ち歩き用はマイクロコードを両方入れる"; else ng "持ち歩き用はマイクロコードを両方入れる" "$_pp"; fi
+if _has "$_pp" vulkan-intel && _has "$_pp" vulkan-radeon && _has "$_pp" vulkan-nouveau && _has "$_pp" intel-media-driver; then
+  ok "持ち歩き用は Intel / AMD / NVIDIA のドライバを全部入れる"
+else
+  ng "持ち歩き用は Intel / AMD / NVIDIA のドライバを全部入れる" "$_pp"
+fi
+if _has "$_pp" nvidia-open; then ng "持ち歩き用は nvidia-open を入れない（nouveau を止めてしまう）" "$_pp"; else ok "持ち歩き用は nvidia-open を入れない（nouveau を止めてしまう）"; fi
+_np=$(CONFIG[portable]=no; CONFIG[gpu_driver]=intel; CONFIG[cpu_vendor]=GenuineIntel; _l=(); _collect_pacstrap_pkgs _l quiet; echo "${_l[*]}")
+if _has "$_np" amd-ucode; then ng "持ち歩き用でなければ AMD のマイクロコードは入れない" "$_np"; else ok "持ち歩き用でなければ AMD のマイクロコードは入れない"; fi
+
 # --------------------------------------------
 section "確認画面 (show_summary)"
 CONFIG[disk]=/dev/nvme0n1; CONFIG[partition_scheme]=auto_noswap; CONFIG[hostname]=esca
@@ -124,6 +155,16 @@ if (( maxw <= 80 )); then ok "80桁以内に収まる（最大${maxw}桁）"; el
 if grep -q 'auto_noswap\|uefi' <<< "$summary"; then ng "内部値（auto_noswap 等）が出ていない"; else ok "内部値（auto_noswap 等）が出ていない"; fi
 last_info=$(grep -n 'ディスク' <<< "$summary" | tail -n1 | cut -d: -f1)
 if (( lines - last_info <= 6 )); then ok "消去されるディスクが画面の下の方にある"; else ng "消去されるディスクが画面の下の方にある" "${last_info}行目 / ${lines}行"; fi
+# 持ち歩き用（行が増える構成）でも画面に収まること
+_ps_summary="$(CONFIG[portable]=yes; CONFIG[share_size_gib]=25; CONFIG[gpu_driver]=portable; show_summary 2>&1 | sed 's/\x1b\[[0-9;]*[mK]//g')"
+_ps_lines=$(printf '%s\n' "$_ps_summary" | wc -l)
+_ps_maxw=0
+while IFS= read -r l; do
+  [[ "$l" =~ ^[[:space:]]*(━|─)+$ ]] && continue
+  w=$(_dispw "$l"); (( w > _ps_maxw )) && _ps_maxw=$w
+done <<< "$_ps_summary"
+if (( _ps_lines <= 30 && _ps_maxw <= 80 )); then ok "持ち歩き用でも 30行・80桁に収まる（${_ps_lines}行・最大${_ps_maxw}桁）"; else ng "持ち歩き用でも 30行・80桁に収まる" "${_ps_lines}行・最大${_ps_maxw}桁"; fi
+if grep -q '持ち歩き用' <<< "$_ps_summary" && grep -q '共有 25GB' <<< "$_ps_summary"; then ok "持ち歩き用と共有領域が確認画面に出る"; else ng "持ち歩き用と共有領域が確認画面に出る"; fi
 
 # --------------------------------------------
 section "標準コンソール用の記号 (TERM=linux)"
@@ -209,6 +250,13 @@ _out=$(bash "${ROOT_DIR}/install.sh" --dryrun 2>&1); _rc=$?
 eq "打ち間違い（--dryrun）は起動せずに止まる" "$_rc:$(grep -c '不明なオプションです: --dryrun' <<< "$_out")" "1:1"
 _out=$(bash "${ROOT_DIR}/install.sh" --help 2>&1); _rc=$?
 eq "--help は使い方を出して終わる" "$_rc:$(grep -c '使い方:' <<< "$_out")" "0:1"
+
+# --------------------------------------------
+section "画面の文言"
+# 確認は y / n で答える方式なので、「はい」「いいえ」を選ぶような案内を出さない
+# （以前は「『はい』にすると…」と表示していて、何を入力すればよいか迷う形だった）
+_yn=$(grep -nE '「(はい|いいえ)」' "${ROOT_DIR}/install.sh" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+if [[ -z "$_yn" ]]; then ok "案内は y / n で書く（「はい」「いいえ」と書かない）"; else ng "案内は y / n で書く（「はい」「いいえ」と書かない）" "$_yn"; fi
 
 # --------------------------------------------
 section "その他"
