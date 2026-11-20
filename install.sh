@@ -6222,6 +6222,11 @@ EOF
       # という「警告が逆になる」状態だった。実在するリリース番号だけを書く。
       local HYPR_VERIFIED_VERSION="0.55"           # このHyprland設定ロジックを最後に検証したバージョン
       local HYPR_LUA_DEPRECATION_VERSION="0.55.0"  # hyprlang が非推奨になった版
+      # 【要追跡 / 2026-11-20 時点】Hyprland 0.57.0（2026-10-28）で hyprlang(.conf) の
+      # サポートが完全に削除された（PR #15539 "config: remove legacy config support"）。
+      # 0.57 以降は hyprland.conf を置いても一切読まれず、自動変換ツールも無い。
+      #   ・参考: https://hypr.land/news/update57/
+      local HYPR_CONF_REMOVED_VERSION="0.57.0"     # hyprlang(.conf) が読まれなくなった版
       # 【重要】インストール済みバージョンの取得は「ベース設定を決める前」に行うこと。
       # 0.55 以上かどうかで .lua を生成するか .conf 経路に進むかが変わるため、
       # 従来のように後段で取得していると分岐に使えない。
@@ -6233,6 +6238,7 @@ EOF
       # 【重要】ホストPC / dotfiles の hypr/ があれば最優先で尊重する。
       # ユーザーが作り込んだ設定を .lua で上書きするのは論外なので、
       # その場合だけは hyprlang(.conf) のまま進め、非推奨である旨を警告する。
+      # ただし 0.57 以降は .conf が読まれないため、引き継ぎ元が .conf だけなら引き継がない。
       # ホスト設定が無い場合は、0.55 以上なら .lua を生成する。
       # こうしないと最小フォールバックの .conf が使われ、起動のたびに
       # 「hyprland.conf は非推奨」バナーが出続ける。
@@ -6246,6 +6252,19 @@ EOF
       if [[ -n "$host_home_hypr" ]]; then
         host_hypr_cfg="${host_home_hypr}/.config/hypr/hyprland.conf"
         host_hypr_lua="${host_home_hypr}/.config/hypr/hyprland.lua"
+      fi
+
+      # 【重要】0.57 以降は .conf が読まれないため、引き継ぎ元に hyprland.conf しか
+      # 無くても、それを土台にしてはいけない（ログインしても設定が一切効かない）。
+      # その場合は引き継ぎを諦めて hyprland.lua を生成し、理由を知らせる。
+      local hypr_conf_removed="no"
+      if [[ -n "$hypr_installed_ver" ]] && _version_ge "$hypr_installed_ver" "$HYPR_CONF_REMOVED_VERSION"; then
+        hypr_conf_removed="yes"
+      fi
+      if [[ "$hypr_conf_removed" == "yes" && -n "$host_hypr_cfg" && -f "$host_hypr_cfg" \
+            && ! ( -n "$host_hypr_lua" && -f "$host_hypr_lua" ) ]]; then
+        print_warn "Hyprland ${hypr_installed_ver}: 引き継ぎ元の設定は hyprland.conf だけですが、0.57 以降は .conf が読まれません。引き継ぎは行わず、hyprland.lua を新しく生成します。元の設定を使うには、手作業で hyprland.lua に書き換えてください: https://hypr.land/news/update57/"
+        host_hypr_cfg=""
       fi
 
       # 【注意】ドライランでは run_cmd が実際にはコピーしないため、これらの分岐に入ると
@@ -6316,17 +6335,26 @@ EOF
         # 「.conf を編集しても何も変わらない」という分かりにくい状態になる。
         rm -f ${SKEL_ROOT}/.config/hypr/hyprland.conf
         print_ok "Hyprland ${hypr_installed_ver}: Lua 設定 (hyprland.lua) を生成します"
-      elif [ -f /mnt/usr/share/hypr/hyprland.conf ]; then
-        cp /mnt/usr/share/hypr/hyprland.conf "$hypr_cfg" && copied=1
-      elif [ -f /mnt/etc/xdg/hypr/hyprland.conf ]; then
-        cp /mnt/etc/xdg/hypr/hyprland.conf "$hypr_cfg" && copied=1
       elif [ -f /mnt/usr/share/hypr/hyprland.lua ] || [ -f /mnt/etc/xdg/hypr/hyprland.lua ]; then
         # 【検知】バージョン取得に失敗した（pacman -Q が空を返した等）が、
         # パッケージ既定は .lua になっている、という食い違いの場合のみここに来る。
         # 上の _version_ge 判定が通っていればこの分岐には入らない。
-        print_warn "Hyprland: バージョンを判別できませんでしたが、パッケージ既定は hyprland.lua のようです。最小フォールバック設定(.conf)を使用するため、非推奨バナーが出る可能性があります（https://hypr.land/news/26_lua/ ）。"
+        # 【重要】この分岐は下の .conf 探索より「前」に置くこと。パッケージが
+        # hyprland.lua を同梱しているなら 0.55 以降であり、0.57 以降なら .conf は
+        # 読まれない。以前はここで最小フォールバックの .conf を使っていたが、
+        # 0.57 では設定が一切効かない状態になるため、Lua 生成に切り替える。
+        hypr_cfg_mode="lua"
+        hypr_cfg=${SKEL_ROOT}/.config/hypr/hyprland.lua
+        copied=1
+        rm -f ${SKEL_ROOT}/.config/hypr/hyprland.conf
+        print_warn "Hyprland: バージョンを判別できませんでしたが、パッケージ既定が hyprland.lua なので、Lua 設定 (hyprland.lua) を生成します。"
+      elif [ -f /mnt/usr/share/hypr/hyprland.conf ]; then
+        cp /mnt/usr/share/hypr/hyprland.conf "$hypr_cfg" && copied=1
+      elif [ -f /mnt/etc/xdg/hypr/hyprland.conf ]; then
+        cp /mnt/etc/xdg/hypr/hyprland.conf "$hypr_cfg" && copied=1
       fi
       if [ $copied -eq 0 ]; then
+        # 0.55 より古い Hyprland で、パッケージ既定の設定も見つからない場合だけここに来る。
         cat > ${SKEL_ROOT}/.config/hypr/hyprland.conf << 'EOF'
 # Hyprland 最小フォールバック設定
 monitor=,preferred,auto,auto
@@ -6350,7 +6378,7 @@ EOF
       # .lua を生成した場合はバナーが出ないため、警告してはいけない。
       if [[ "$hypr_cfg_mode" == "conf" && -n "$hypr_installed_ver" ]] \
          && _version_ge "$hypr_installed_ver" "$HYPR_LUA_DEPRECATION_VERSION"; then
-        print_warn "Hyprland ${hypr_installed_ver}: hyprland.conf(hyprlang) は非推奨です。起動時に非推奨バナーが出ます（.conf 自体の動作は当面継続）。将来のために hyprland.lua への移行を検討してください: https://hypr.land/news/26_lua/"
+        print_warn "Hyprland ${hypr_installed_ver}: hyprland.conf(hyprlang) は非推奨です。起動時に非推奨バナーが出ます。0.57 以降では .conf が読まれなくなるため、更新する前に hyprland.lua へ移行してください: https://hypr.land/news/update57/"
       fi
 
       if [[ "$hypr_cfg_mode" == "lua" ]]; then
